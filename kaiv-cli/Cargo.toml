@@ -1,0 +1,20 @@
+[package]
+name = "kaiv-cli"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.84.0"
+license = "MIT OR Apache-2.0"
+repository = "https://gitlab.com/kaiv-format/kaiv-rs"
+authors = ["Bojan Đuričković"]
+description = "Command-line toolchain for the kaiv format: compile, validate, infer, and import/export JSON, YAML, TOML, and JSON Schema"
+keywords = ["kaiv", "cli", "configuration", "schema", "validation"]
+categories = ["command-line-utilities", "config"]
+readme = "README.md"
+homepage = "https://kaiv.io/"
+
+[[bin]]
+name = "kaiv"
+path = "src/main.rs"
+
+[dependencies]
+kaiv = { path = "../kaiv", version = "0.2.0", features = ["json", "yaml", "toml"] }

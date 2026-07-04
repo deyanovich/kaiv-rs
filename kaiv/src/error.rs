@@ -1,0 +1,117 @@
+//! Error catalog per SPEC.md § Errors. Names match the spec strings
+//! exactly; the conformance runner compares against them.
+
+use std::fmt;
+
+/// Lexer errors (SPEC.md § Lexer Errors), in priority order: when one
+/// line raises several, the lowest discriminant wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LexError {
+    Bom,
+    InvalidUtf8,
+    InvalidCharacter,
+    MissingFinalEol,
+    InvalidVersion,
+    UnsupportedVersion,
+    EmptyKey,
+    MissingOperator,
+    InvalidKey,
+    InvalidDirective,
+    InvalidConstraint,
+}
+
+impl LexError {
+    pub fn name(self) -> &'static str {
+        match self {
+            LexError::Bom => "BOM_ERROR",
+            LexError::InvalidUtf8 => "INVALID_UTF8_ERROR",
+            LexError::InvalidCharacter => "INVALID_CHARACTER_ERROR",
+            LexError::MissingFinalEol => "MISSING_FINAL_EOL_ERROR",
+            LexError::InvalidVersion => "INVALID_VERSION_ERROR",
+            LexError::UnsupportedVersion => "UNSUPPORTED_VERSION_ERROR",
+            LexError::EmptyKey => "EMPTY_KEY_ERROR",
+            LexError::MissingOperator => "MISSING_OPERATOR_ERROR",
+            LexError::InvalidKey => "INVALID_KEY_ERROR",
+            LexError::InvalidDirective => "INVALID_DIRECTIVE_ERROR",
+            LexError::InvalidConstraint => "INVALID_CONSTRAINT_ERROR",
+        }
+    }
+}
+
+impl fmt::Display for LexError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A lexer error with the 1-based line it was detected on
+/// (0 = whole-document errors reported without a line number).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexErrorAt {
+    pub error: LexError,
+    pub line: usize,
+}
+
+/// Application errors (SPEC.md § Application Errors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppError {
+    MetadataWithoutTarget,
+    SchemaDuplicateKey,
+    SchemaResolution,
+    RequiredFieldSchema,
+    DuplicateKeySchema,
+    UndefinedFieldStrictSchema,
+    ProvenanceSchema,
+    TypeMismatch,
+    ConstraintViolation,
+    UniquenessViolation,
+    ReferentialIntegrity,
+    CardinalityViolation,
+    CollationUnsupported,
+}
+
+impl AppError {
+    pub fn name(self) -> &'static str {
+        match self {
+            AppError::MetadataWithoutTarget => "MetadataWithoutTargetError",
+            AppError::SchemaDuplicateKey => "SchemaDuplicateKeyError",
+            AppError::SchemaResolution => "SchemaResolutionError",
+            AppError::RequiredFieldSchema => "RequiredFieldSchemaError",
+            AppError::DuplicateKeySchema => "DuplicateKeySchemaError",
+            AppError::UndefinedFieldStrictSchema => "UndefinedFieldStrictSchemaError",
+            AppError::ProvenanceSchema => "ProvenanceSchemaError",
+            AppError::TypeMismatch => "TypeMismatchError",
+            AppError::ConstraintViolation => "ConstraintViolationError",
+            AppError::UniquenessViolation => "UniquenessViolationError",
+            AppError::ReferentialIntegrity => "ReferentialIntegrityError",
+            AppError::CardinalityViolation => "CardinalityViolationError",
+            AppError::CollationUnsupported => "CollationUnsupportedError",
+        }
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// Any failure along the build pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PipelineError {
+    Lex(LexErrorAt),
+    App(AppError),
+    /// Compiler-internal malformation with context (a condition the
+    /// spec assigns to no named error).
+    Other(String),
+}
+
+impl fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PipelineError::Lex(e) => write!(f, "{} (line {})", e.error, e.line),
+            PipelineError::App(e) => e.fmt(f),
+            PipelineError::Other(s) => f.write_str(s),
+        }
+    }
+}

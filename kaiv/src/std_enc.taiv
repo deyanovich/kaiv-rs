@@ -1,0 +1,42 @@
+.!kaivtype 1 std/enc
+
+// Encoding library: base64url-embedded content, the decoded payload
+// typed by name. Every type derives from b64; the type name states
+// what the decoded bytes contain (the era-1 `!b64 TYPE` encoded-type
+// parameter, expressed as ordinary named types).
+
+// Generic binary
+!b64
+&bin=
+
+// Multi-line UTF-8 text
+!b64
+&txt=
+
+// JSON document
+!b64
+&json=
+
+// YAML document
+!b64
+&yaml=
+
+// TOML document
+!b64
+&toml=
+
+// XML document
+!b64
+&xml=
+
+// HTML document
+!b64
+&html=
+
+// Markdown document
+!b64
+&md=
+
+// CSV table
+!b64
+&csv=

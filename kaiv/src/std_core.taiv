@@ -1,0 +1,21 @@
+.!kaivtype 1 std/core
+
+// Integer — decimal string with numeric ordering
+/^-?[0-9]+$/ ..num
+&int=
+
+// Floating-point number — decimal string with numeric ordering
+/^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/ ..num
+&float=
+
+// Boolean — two-valued enumeration
+{true,false}
+&bool=
+
+// Null — empty value only
+/^$/
+&null=
+
+// Base64url-encoded binary data (RFC 4648 section 5, unpadded)
+/^[A-Za-z0-9_-]*$/
+&b64=

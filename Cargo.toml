@@ -1,0 +1,11 @@
+[workspace]
+members = ["kaiv", "kaiv-cli"]
+resolver = "2"
+
+# Workspace-level release profile (package-level profiles on non-root
+# members are silently ignored by Cargo). LTO matters for the CLI
+# binary: the hot paths cross the kaiv-cli -> kaiv crate boundary.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

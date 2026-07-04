@@ -1,0 +1,20 @@
+.!kaivtype 1 std/time
+
+// Time library: RFC 3339 shapes with chronological (..time) span
+// ordering. The four types mirror the four TOML datetime flavors.
+
+// Offset date-time: 2026-07-03T21:00:00Z, 2026-07-03 21:00:00+02:00
+/^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/ ..time
+&datetime=
+
+// Local date-time: no offset
+/^\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(\.\d+)?$/ ..time
+&localdatetime=
+
+// Local date
+/^\d{4}-\d{2}-\d{2}$/ ..time
+&date=
+
+// Local time
+/^\d{2}:\d{2}:\d{2}(\.\d+)?$/ ..time
+&time=

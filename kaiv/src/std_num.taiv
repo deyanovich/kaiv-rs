@@ -1,0 +1,14 @@
+.!kaivtype 1 std/num
+
+// Numeric marker values. kaiv floats are deliberately finite -- the
+// ..num span is a total, decidable order -- so the IEEE non-finite
+// markers are dedicated enum types, mirroring null-as-a-type. An
+// extended-real field is the union idiom: !float|std/num/inf.
+
+// Signed infinity
+{inf,-inf}
+&inf=
+
+// Not-a-number
+{nan}
+&nan=
