@@ -4,7 +4,8 @@
 //! types (`&datetime`, `&localdatetime`, `&date`, `&time`) and emit
 //! back as bare TOML datetimes; in datetime-less targets they degrade
 //! to strings. TOML cannot represent null — exporting a `!null` field
-//! is an error. Fidelity is semantic: hex/octal/binary/underscored
+//! is an error, as is an integer beyond i64 (it would silently round
+//! through f64). Fidelity is semantic: hex/octal/binary/underscored
 //! integer literals normalize to decimal (value exact via i64).
 //! Non-finite floats ride the typed channel as `std/num` marker
 //! types (`&inf`, `&nan`) — kaiv floats are deliberately finite, and
@@ -87,10 +88,36 @@ fn from_val(v: &Val) -> Result<Value, PipelineError> {
         Val::Bool(b) => Value::Boolean(*b),
         Val::Num(raw) => match raw.parse::<i64>() {
             Ok(i) => Value::Integer(i),
-            Err(_) => Value::Float(
-                raw.parse::<f64>()
-                    .map_err(|_| err(format!("bad number: {raw}")))?,
-            ),
+            // An integer-shaped token beyond i64 must not silently
+            // round through f64 — TOML has no wider integer.
+            Err(_) if raw.bytes().all(|b| b == b'-' || b.is_ascii_digit()) => {
+                return Err(err(format!(
+                    "TOML cannot represent the integer {raw} (exceeds i64)"
+                )))
+            }
+            Err(_) => {
+                let f = raw
+                    .parse::<f64>()
+                    .map_err(|_| err(format!("bad number: {raw}")))?;
+                // f64 FromStr saturates: an overflowing finite token
+                // becomes inf and an underflowing one becomes 0.0.
+                // Refuse rather than corrupt, mirroring the integer arm.
+                if !f.is_finite() {
+                    return Err(err(format!(
+                        "TOML cannot represent the float {raw} (overflows f64)"
+                    )));
+                }
+                // Only the significand decides zeroness; a nonzero
+                // exponent over a zero mantissa (`0e5`) is exactly zero,
+                // not an underflow.
+                let mantissa = raw.split(['e', 'E']).next().unwrap_or(raw);
+                if f == 0.0 && mantissa.bytes().any(|b| matches!(b, b'1'..=b'9')) {
+                    return Err(err(format!(
+                        "TOML cannot represent the float {raw} (underflows f64)"
+                    )));
+                }
+                Value::Float(f)
+            }
         },
         Val::Str(s) => Value::String(s.clone()),
         Val::Typed { lib, text, .. } if lib == "std/time" => Value::Datetime(
@@ -133,6 +160,16 @@ fn from_val(v: &Val) -> Result<Value, PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_float_export_rejected() {
+        assert!(export(".!kaiv 1\n!float'::x=1e400\n").is_err());
+        assert!(export(".!kaiv 1\n!float'::y=1e-400\n").is_err());
+        // A representable float and genuine zeros (incl. `0e5`) export.
+        assert!(export(".!kaiv 1\n!float'::z=1.5\n").is_ok());
+        assert!(export(".!kaiv 1\n!float'::w=0.0\n").is_ok());
+        assert!(export(".!kaiv 1\n!float'::v=0e5\n").is_ok());
+    }
 
     #[test]
     fn import_typing_and_natives() {
@@ -221,6 +258,16 @@ mod tests {
     fn null_export_rejected() {
         let daiv = ".!kaiv 1\n!null'::note=\n";
         assert!(export(daiv).is_err());
+    }
+
+    #[test]
+    fn oversize_integer_export_rejected() {
+        // Beyond i64 the value would silently round through f64;
+        // refuse instead of corrupting it.
+        let daiv = ".!kaiv 1\n!int'::count=18446744073709551616\n";
+        assert!(export(daiv).is_err());
+        let daiv = ".!kaiv 1\n!int'::max=9223372036854775807\n";
+        assert!(export(daiv).unwrap().contains("max = 9223372036854775807"));
     }
 
     #[test]

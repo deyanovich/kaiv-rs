@@ -9,7 +9,7 @@ use crate::error::{AppError, PipelineError};
 use crate::lexer::{lex, FileKind, LineKind};
 use crate::resolve::{resolve_named, Resolver};
 use crate::taiv::std_core;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Compile with the core-only resolver (embedded `std/core`, no
 /// registry configuration).
@@ -18,20 +18,51 @@ pub fn compile_schema(input: &[u8]) -> Result<String, PipelineError> {
 }
 
 pub fn compile_schema_with(input: &[u8], resolver: &Resolver) -> Result<String, PipelineError> {
-    compile_schema_depth(input, resolver, 0)
+    compile_schema_chain(input, resolver, &mut Vec::new())
 }
 
 const MAX_INHERIT_DEPTH: usize = 8;
 
-fn compile_schema_depth(
+/// Validate a type library: parse, then lower every definition —
+/// transitively, through the resolver — so unresolvable or cyclic
+/// references are caught at publish time rather than first use.
+/// The library's own bytes are preloaded, so same-library `&name`
+/// references resolve without a fetch.
+pub fn check_type_lib(
     input: &[u8],
     resolver: &Resolver,
-    depth: usize,
+) -> Result<crate::taiv::TypeLib, PipelineError> {
+    let lib = crate::taiv::parse_taiv(input)?;
+    if lib.library.is_empty() {
+        return Err(PipelineError::Other(
+            ".taiv missing .!kaivtype library identity".into(),
+        ));
+    }
+    resolver.preload(&lib.library, "taiv", input.to_vec());
+    for (name, def) in &lib.types {
+        let mut b = Buckets::default();
+        let mut col = Collected::default();
+        bucket_items(&def.items, &lib.library, resolver, &[], &mut b, &mut col, 0)
+            .map_err(|e| PipelineError::Other(format!("type &{name}: {e}")))?;
+    }
+    Ok(lib)
+}
+
+fn compile_schema_chain(
+    input: &[u8],
+    resolver: &Resolver,
+    // The `.!schema` references already being compiled, outermost
+    // first — revisiting one is a SchemaInheritanceCycleError.
+    chain: &mut Vec<String>,
 ) -> Result<String, PipelineError> {
     let lines = lex(input, FileKind::Schema).map_err(PipelineError::Lex)?;
     let mut out: Vec<String> = Vec::new();
     let mut pending: Option<Annotation> = None;
     let mut ns_prefix: Vec<String> = Vec::new();
+    // Segment count pushed by each open namespace block, so a
+    // multi-segment `(/a/b)` is popped whole on `()` (mirrors the data
+    // compiler's block-wise push/pop).
+    let mut ns_depth: Vec<usize> = Vec::new();
     let mut arr_prefix: Option<String> = None;
     let mut imports: Vec<String> = Vec::new();
     let mut unit_imports: Vec<String> = Vec::new();
@@ -41,10 +72,18 @@ fn compile_schema_depth(
     // § Constraint inheritance — replaces the inherited line in place,
     // keeping the base schema's field order for the parallel scan.
     let mut inherited: HashMap<String, usize> = HashMap::new();
+    // Namepaths this schema body has itself emitted. Redeclaring an
+    // *inherited* field narrows it (allowed); redeclaring one this
+    // body already defined is a duplicate (SPEC.md § Schema
+    // Compilation Errors).
+    let mut local_keys: HashSet<String> = HashSet::new();
 
     for line in &lines {
         match &line.kind {
             LineKind::Blank | LineKind::Comment(_) | LineKind::Doc(_) => {}
+            // Splat lines are authored-`.kaiv`-only; the Data-file
+            // lexer never produces them for FileKind::Schema.
+            LineKind::VarSplat(_) => unreachable!("var-splat in schema lex"),
             LineKind::Decl(s) => {
                 // .!kaivschema (with any strict modifier) passes through;
                 // .!types imports and .!registry overrides configure
@@ -68,7 +107,7 @@ fn compile_schema_depth(
                         &registries,
                         &mut out,
                         &mut inherited,
-                        depth,
+                        chain,
                     )?;
                 } else if let Some(rest) = s.strip_prefix(".!types") {
                     let lib = rest.trim_matches([' ', '\t']);
@@ -131,18 +170,63 @@ fn compile_schema_depth(
                         }
                     }
                     pending = Some(a);
+                } else {
+                    // A bare constraint line: anonymous refinement of
+                    // the next field's implicit `str` type (SPEC.md
+                    // § Anonymous Refinement) — the .taiv definition
+                    // shape applied to a field. Anything else landing
+                    // in Meta (a `?` provenance list, a stray no-`=`
+                    // line) has no .saiv meaning and must reject, not
+                    // drop: a silently dropped annotation weakens the
+                    // compiled contract relative to the authored one.
+                    let items = parse_constraint_items(s)
+                        .ok_or_else(|| PipelineError::Other(format!("bad constraint line: {s}")))?;
+                    let mut a = Annotation {
+                        type_name: "str".into(),
+                        ..Annotation::default()
+                    };
+                    for it in items {
+                        match it {
+                            Item::Constraint(c) => a.constraints.push(c),
+                            _ => {
+                                return Err(PipelineError::Other(format!(
+                                    "only value-constraint items may appear on a bare constraint line: {s}"
+                                )))
+                            }
+                        }
+                    }
+                    pending = Some(a);
                 }
             }
             LineKind::NsOpen(inner) => {
-                let head = inner.split([' ', '\t']).next().unwrap_or("");
-                for seg in head.trim_start_matches('/').split('/') {
-                    if !seg.is_empty() {
-                        ns_prefix.push(crate::compiler::normalize_seg(seg));
-                    }
+                // A `schema:` composition annotation on a namespace
+                // block is DFA composition — unsupported; reject rather
+                // than silently drop (matches the data compiler and the
+                // module's no-silent-drop policy).
+                if inner.split([' ', '\t']).any(|t| t.starts_with("schema:")) {
+                    return Err(PipelineError::Other(
+                        "namespace-block schema: annotations (DFA composition) are not supported"
+                            .into(),
+                    ));
                 }
+                // Quote-aware: a quoted segment may contain whitespace.
+                let toks = crate::table::tokens(inner);
+                let head = toks.first().copied().unwrap_or("");
+                let segs: Vec<String> = head
+                    .trim_start_matches('/')
+                    .split('/')
+                    .filter(|s| !s.is_empty())
+                    .map(crate::compiler::normalize_seg)
+                    .collect();
+                ns_depth.push(segs.len());
+                ns_prefix.extend(segs);
             }
             LineKind::NsClose => {
-                ns_prefix.pop();
+                // Pop the whole block's segments, not just one — a
+                // multi-segment `(/a/b)` pushed several.
+                if let Some(n) = ns_depth.pop() {
+                    ns_prefix.truncate(ns_prefix.len() - n);
+                }
             }
             LineKind::SectionOpen(inner) => {
                 if arr_prefix.is_some() {
@@ -194,6 +278,7 @@ fn compile_schema_depth(
                             .map(crate::compiler::normalize_seg),
                     );
                     let np = format!("/{}::", all.join("/"));
+                    check_dup(&inherited, &mut local_keys, &np)?;
                     emit(
                         &mut out,
                         &inherited,
@@ -213,10 +298,27 @@ fn compile_schema_depth(
                 // Schema); the entry constraint applies to every entry.
                 let (items, type_defaults, namepath) = if let Some(arr) = &arr_prefix {
                     // Element-level field of the open section block:
-                    // the elided-index namepath `{arr}/::field`.
+                    // the elided-index namepath `{arr}/::field`. The
+                    // name canonicalizes like any other segment — a
+                    // quoted bare-shaped spelling (`"re"`, quoted to
+                    // clear the authored reserved-word rule) loses its
+                    // quotes so data-side namepaths match.
                     let (items, td) = lower_with_defaults(&a, resolver, &registries)?;
-                    (items, td, format!("{arr}/::{key}"))
+                    (
+                        items,
+                        td,
+                        format!("{arr}/::{}", crate::compiler::normalize_seg(key)),
+                    )
                 } else if a.type_name == "map" {
+                    // The map-type grammar admits neither a unit nor
+                    // inline constraints (SPEC.md § 10.5) — reject
+                    // rather than silently drop them.
+                    if a.unit.is_some() || !a.constraints.is_empty() {
+                        return Err(PipelineError::Other(
+                            "a map annotation admits neither a unit nor inline constraints"
+                                .into(),
+                        ));
+                    }
                     let va = Annotation {
                         type_name: a.map_value.clone().unwrap_or_else(|| "str".into()),
                         ..Annotation::default()
@@ -238,10 +340,26 @@ fn compile_schema_depth(
                 let joined = items.join(" ");
                 let parsed = parse_constraint_items(&joined)
                     .ok_or_else(|| PipelineError::Other(format!("bad lowered items: {joined}")))?;
-                let default = std::iter::once(*value)
+                let resolved = std::iter::once(*value)
                     .chain(type_defaults.iter().map(String::as_str))
-                    .find(|d| crate::validator::default_applicable(&parsed, d))
-                    .unwrap_or("");
+                    .chain(std::iter::once(""))
+                    .find(|d| crate::validator::default_applicable(&parsed, d));
+                // An optional non-collection field whose resolved
+                // default is inapplicable and whose type does not
+                // admit `!null` leaves the Denormalizer nothing to
+                // materialize for an absent instance — rejected here
+                // (SPEC.md § Default Values,
+                // SchemaOptionalWithoutDefaultError). Map-entry lines
+                // (`…::`) are collections: absent means empty, fine.
+                if optional
+                    && resolved.is_none()
+                    && !namepath.ends_with("::")
+                    && !admits_null(&parsed)
+                {
+                    return Err(PipelineError::App(AppError::SchemaOptionalWithoutDefault));
+                }
+                let default = resolved.unwrap_or("");
+                check_dup(&inherited, &mut local_keys, &namepath)?;
                 emit(
                     &mut out,
                     &inherited,
@@ -260,14 +378,57 @@ fn compile_schema_depth(
     let mut s = out.join("\n");
     if !s.is_empty() {
         s.push('\n');
+        // `required`/`source` provenance levels are statically
+        // incompatible with optional fields: materialization
+        // synthesizes provenance-less lines, so the pipeline could
+        // never produce a valid artifact (SPEC.md § Requiring
+        // Provenance in Schemas). Checked on the assembled artifact so
+        // inherited optional fields are covered too.
+        let compiled = crate::validator::parse_csaiv(&s)?;
+        if matches!(
+            compiled.provenance,
+            Some(crate::validator::ProvenanceLevel::Required)
+                | Some(crate::validator::ProvenanceLevel::Source)
+        ) && compiled.fields.iter().any(|f| f.optional)
+        {
+            return Err(PipelineError::App(AppError::ProvenanceSchema));
+        }
     }
     Ok(s)
+}
+
+/// Does the lowered item set admit `!null`? Only a union with a
+/// `null` head or alternative does — constraint-only lowerings have
+/// no null representation.
+fn admits_null(items: &[Item]) -> bool {
+    items.iter().any(|i| match i {
+        Item::Anno(a) => a.type_name == "null" || a.union.iter().any(|alt| alt.name == "null"),
+        _ => false,
+    })
+}
+
+/// A field redeclared within one schema body — not a narrowing of
+/// an inherited field — is a duplicate key (SchemaDuplicateKeyError).
+fn check_dup(
+    inherited: &HashMap<String, usize>,
+    local_keys: &mut HashSet<String>,
+    key: &str,
+) -> Result<(), PipelineError> {
+    if !inherited.contains_key(key) && !local_keys.insert(key.to_string()) {
+        return Err(PipelineError::App(AppError::SchemaDuplicateKey));
+    }
+    Ok(())
 }
 
 /// Emit a compiled line: a key already indexed by inheritance is
 /// replaced in place (redeclaration narrows the inherited field);
 /// anything else appends.
-fn emit(out: &mut Vec<String>, inherited: &HashMap<String, usize>, key: &str, line: String) {
+pub(crate) fn emit(
+    out: &mut Vec<String>,
+    inherited: &HashMap<String, usize>,
+    key: &str,
+    line: String,
+) {
     match inherited.get(key) {
         Some(&i) => out[i] = line,
         None => out.push(line),
@@ -278,7 +439,7 @@ fn emit(out: &mut Vec<String>, inherited: &HashMap<String, usize>, key: &str, li
 /// reference): `.!schema hub/x`, `.!schema:hub/x` (flat),
 /// `.!schema:/ns hub/x` (encapsulated), `.!schema:/@arr hub/x`
 /// (array-element).
-fn parse_schema_ref(rest: &str) -> Option<(Option<String>, String)> {
+pub(crate) fn parse_schema_ref(rest: &str) -> Option<(Option<String>, String)> {
     let (qual, r) = if let Some(c) = rest.strip_prefix(':') {
         if c.starts_with('/') {
             let mut it = c.splitn(2, [' ', '\t']);
@@ -307,12 +468,15 @@ fn inherit(
     layer1: &[(String, String)],
     out: &mut Vec<String>,
     inherited: &mut HashMap<String, usize>,
-    depth: usize,
+    chain: &mut Vec<String>,
 ) -> Result<(), PipelineError> {
-    if depth >= MAX_INHERIT_DEPTH {
-        return Err(PipelineError::Other(
-            "schema inheritance too deep (cycle?)".into(),
-        ));
+    // A `.!schema` chain that revisits a schema already being
+    // compiled is a cycle (SPEC.md § Errors).
+    if chain.iter().any(|r| r == reference) {
+        return Err(PipelineError::App(AppError::SchemaInheritanceCycle));
+    }
+    if chain.len() >= MAX_INHERIT_DEPTH {
+        return Err(PipelineError::Other("schema inheritance too deep".into()));
     }
     if reference.starts_with("http://") || reference.starts_with("https://") {
         // URL references are network resolution — unimplemented
@@ -320,7 +484,10 @@ fn inherit(
         return Err(PipelineError::App(AppError::SchemaResolution));
     }
     let bytes = resolver.schema_bytes(reference, layer1)?;
-    let compiled = compile_schema_depth(&bytes, resolver, depth + 1)?;
+    chain.push(reference.to_string());
+    let compiled = compile_schema_chain(&bytes, resolver, chain);
+    chain.pop();
+    let compiled = compiled?;
     let element_wise =
         qualifier.is_some_and(|q| q.split('/').next_back().is_some_and(|s| s.starts_with('@')));
     for line in compiled.lines() {
@@ -343,7 +510,7 @@ fn inherit(
 
 /// The override key of a compiled line: the namepath of a field /
 /// map / vector line, or the array path of a collection line.
-fn line_key(line: &str) -> String {
+pub(crate) fn line_key(line: &str) -> String {
     match line.find('\'') {
         Some(t) => {
             let rest = &line[t + 1..];
@@ -358,7 +525,7 @@ fn line_key(line: &str) -> String {
 /// Scope an inherited compiled line under a namespace: the namepath
 /// gains the prefix; a collection line's array path and foreign-key
 /// targets are re-anchored with it.
-fn reprefix(line: &str, ns: &str) -> Result<String, PipelineError> {
+pub(crate) fn reprefix(line: &str, ns: &str) -> Result<String, PipelineError> {
     match line.find('\'') {
         Some(t) => Ok(format!("{}'{ns}{}", &line[..t], &line[t + 1..])),
         None => {
@@ -380,7 +547,7 @@ fn reprefix(line: &str, ns: &str) -> Result<String, PipelineError> {
 /// Turn an inherited root scalar field line into an element-level
 /// line of `arr` (`!str'::host=` → `!str'/@arr/::host=`). Deeper
 /// structure is not expressible in the element-level compiled subset.
-fn element_line(line: &str, arr: &str) -> Result<String, PipelineError> {
+pub(crate) fn element_line(line: &str, arr: &str) -> Result<String, PipelineError> {
     let not_element = || {
         PipelineError::Other(format!(
             "only root scalar fields extend array elements: {line}"
@@ -451,6 +618,15 @@ fn lower_with_defaults(
     layer1: &[(String, String)],
 ) -> Result<(Vec<String>, Vec<String>), PipelineError> {
     if !a.union.is_empty() {
+        // A unit annotation is exclusive with a union type in the
+        // grammar; the union lowering has no place to carry it, so
+        // reject rather than silently drop it.
+        if a.unit.is_some() {
+            return Err(PipelineError::Other(format!(
+                "unit annotation on a union type: !{}",
+                a.type_name
+            )));
+        }
         // Union: the type names survive as the discriminant, and each
         // alternative carries its lowered definition + narrowing as a
         // whitespace-free parenthesized group, so the union stays one
@@ -476,6 +652,20 @@ fn lower_with_defaults(
     let mut b = Buckets::default();
     let mut col = Collected::default();
     bucket_annotation(a, resolver, layer1, &mut b, &mut col, 0)?;
+    // Units annotate only numeric (`..num`-derived) types (SPEC.md
+    // § Units on Types); a unit on any other type is a compile error,
+    // not a silently-accepted `!str:km`.
+    if col.unit.is_some()
+        && !b
+            .spans
+            .iter()
+            .any(|s| s == "..num" || s.starts_with("..num"))
+    {
+        return Err(PipelineError::Other(format!(
+            "unit annotation on a non-numeric type: !{}",
+            a.type_name
+        )));
+    }
     let mut items = b.into_items(col.b64);
     // A unit-carrying type retains its token first — the unit is not
     // captured by any value constraint, and the Validator
@@ -486,11 +676,13 @@ fn lower_with_defaults(
     if items.is_empty() {
         items.push("!str".into());
     }
-    // A field line may not begin with `#` — rule 2 would classify it
-    // as a comment. When the lowered items would lead with a length
-    // constraint (a str-typed, length-only field), the retained `!str`
-    // type item is emitted first (SPEC.md § The Schema Compiler).
-    if items[0].starts_with('#') {
+    // A field line may not begin with `#` (rule 2 → comment) or `//`
+    // (an empty pattern `//`, or empty `re` body, renders leading
+    // `//`, which parse_csaiv also skips as a comment). In either case
+    // the retained `!str` type item is emitted first so the compiled
+    // line re-lexes as a field rather than being swallowed (SPEC.md
+    // § The Schema Compiler).
+    if items[0].starts_with('#') || items[0].starts_with("//") {
         items.insert(0, "!str".into());
     }
     Ok((items, col.defaults))
@@ -500,7 +692,7 @@ fn lower_with_defaults(
 /// `(…)` group of its lowered definition + narrowing constraints —
 /// concatenated without whitespace (the lowered items are
 /// self-delimiting). An alternative with no constraints stays bare.
-fn render_union_alt(
+pub(crate) fn render_union_alt(
     name: &str,
     narrowing: &[Constraint],
     resolver: &Resolver,
@@ -697,6 +889,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn multi_segment_ns_block_scopes_symmetrically() {
+        // `(/a/b) ... ()` must pop both segments; a field after the
+        // close scopes at root, not the stale `/a`.
+        let out = compile_schema(b".!kaivschema 1 a/n\n(/a/b)\nhost=\n()\nport=\n").unwrap();
+        assert!(out.contains("'/a/b::host="), "got: {out}");
+        assert!(out.contains("'::port="), "got: {out}");
+        assert!(!out.contains("'/a::port="), "stale prefix leaked: {out}");
+    }
+
+    #[test]
+    fn ns_block_schema_annotation_is_rejected() {
+        assert!(compile_schema(b".!kaivschema 1 a/n\n(/server schema:hub/x)\nhost=\n()\n").is_err());
+    }
+
+    #[test]
+    fn unit_on_union_type_is_rejected() {
+        assert!(compile_schema(b".!kaivschema 1 a/u\n!int:s|null\ntimeout=\n").is_err());
+    }
+
+    #[test]
+    fn strict_provenance_levels_reject_optional_fields() {
+        // Materialized lines carry no provenance, so required/source
+        // plus an optional field can never validate — reject statically.
+        assert!(compile_schema(
+            b".!kaivschema 1 a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
+        )
+        .is_err());
+        assert!(compile_schema(
+            b".!kaivschema 1 a/p\n.!provenance:source\n!str\ntimeout?=5\n"
+        )
+        .is_err());
+        // Required-only fields, or the none level, are fine.
+        assert!(
+            compile_schema(b".!kaivschema 1 a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
+        );
+        assert!(compile_schema(b".!kaivschema 1 a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
+    }
+
+    #[test]
+    fn unit_or_constraints_on_map_type_are_rejected() {
+        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>:km\nsettings=\n").is_err());
+        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>[1,5]\nsettings=\n").is_err());
+        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>\nsettings=\n").is_ok());
+    }
+
+    #[test]
+    fn empty_pattern_field_is_not_swallowed_as_comment() {
+        let out = compile_schema(b".!kaivschema 1 a/p\n!str//\nname=\n").unwrap();
+        for line in out.lines() {
+            assert!(
+                !line.trim_start().starts_with("//"),
+                "field emitted as comment: {out}"
+            );
+        }
+        assert_eq!(crate::validator::parse_csaiv(&out).unwrap().fields.len(), 1);
+    }
+
+    #[test]
     fn schema_ref_forms() {
         let p = parse_schema_ref;
         assert_eq!(p(" hub/x"), Some((None, "hub/x".into())));
@@ -708,6 +958,79 @@ mod tests {
         );
         assert_eq!(p(""), None);
         assert_eq!(p(":/ns"), None); // qualifier without a reference
+    }
+
+    /// A resolver whose base lookups all miss on the filesystem —
+    /// keeps these tests off the Layer 4 network hosts.
+    fn dead_end() -> Resolver {
+        let mut config = crate::config::Config::default();
+        config
+            .registries
+            .insert("default".into(), "/nonexistent/kaiv-test".into());
+        Resolver::new(config)
+    }
+
+    #[test]
+    fn check_type_lib_lowers_all_definitions() {
+        // Same-library &name reference and a core base type both
+        // resolve without any external fetch.
+        let ok = b".!kaivtype 1 acme/net\n\n!int[1,65535]\n&port=\n\n&port [80,443]\n&webport=\n";
+        let lib = check_type_lib(ok, &dead_end()).unwrap();
+        assert_eq!(lib.library, "acme/net");
+        assert_eq!(lib.types.len(), 2);
+
+        // A cross-library base reference to an unpublished library
+        // fails, and the missing artifact is recorded for the host.
+        let dangling = b".!kaivtype 1 acme/net\n\n!other/lib/base\n&derived=\n";
+        let r = dead_end();
+        assert!(check_type_lib(dangling, &r).is_err());
+        assert_eq!(
+            r.take_missing(),
+            vec![("other/lib".to_string(), "taiv".to_string())]
+        );
+
+        // Identity is required.
+        assert!(check_type_lib(b"&x=\n", &dead_end()).is_err());
+    }
+
+    #[test]
+    fn unit_on_non_numeric_type_is_rejected() {
+        assert!(compile_schema(b".!kaivschema 1 a/u\n!str:km\ndist=\n").is_err());
+        // A numeric type is fine.
+        assert!(compile_schema(b".!kaivschema 1 a/u\n!float:km\ndist=\n").is_ok());
+    }
+
+    #[test]
+    fn bare_constraint_line_refines_implicit_str() {
+        // Anonymous refinement (SPEC.md § Anonymous Refinement):
+        // the .taiv definition shape above a field — implicit str,
+        // lowered to a bare constraint group like !str + items.
+        let csaiv = compile_schema(
+            b".!kaivschema 1 a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
+        )
+        .unwrap();
+        assert_eq!(
+            csaiv,
+            ".!kaivschema 1 a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
+        );
+    }
+
+    #[test]
+    fn uninterpretable_schema_meta_lines_reject() {
+        // A type-reference item has its own line forms; a `?`
+        // provenance list and a stray no-`=` line have no .saiv
+        // meaning. All reject rather than silently dropping.
+        assert!(compile_schema(b".!kaivschema 1 a/c\n/^[a-z]+$/ &port\nname=\n").is_err());
+        assert!(compile_schema(b".!kaivschema 1 a/c\n?required\nname=\n").is_err());
+        assert!(compile_schema(b".!kaivschema 1 a/c\nstray words\nname=\n").is_err());
+    }
+
+    #[test]
+    fn duplicate_schema_field_is_an_error() {
+        assert_eq!(
+            compile_schema(b".!kaivschema 1 a/d\nhost=\nhost=\n"),
+            Err(PipelineError::App(AppError::SchemaDuplicateKey))
+        );
     }
 
     #[test]

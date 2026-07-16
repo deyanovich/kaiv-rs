@@ -6,6 +6,16 @@
 //! the reverse. Local `$ref`s (`#/$defs/…`, `#/definitions/…`) inline;
 //! `title`/`description` become doc comments; `default` rides the
 //! field's right side; `format` date-time/date/time map to `std/time`.
+//!
+//! **Documented limitation** (shared by every schema converter): the
+//! contract holds for documents whose strings are flat. A non-flat
+//! string (EOL/NUL, leading `$`) imported by a data converter rides
+//! the `std/enc/json` embed channel, and an embed-typed value does
+//! not match a `str`-typed field — validating such a document against
+//! the converted schema reports a type mismatch even though it is
+//! valid under the source schema. Data conversion itself is
+//! unaffected (embeds round-trip losslessly); where multiline strings
+//! are expected, widen the field by hand to `!str|std/enc/json`.
 
 use crate::error::PipelineError;
 use crate::json::{parse_val, Val};
@@ -40,9 +50,15 @@ pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
     let Val::Obj(top) = &resolved else {
         unreachable!()
     };
-    if !matches!(get(top, "type"), None | Some(Val::Str(_)))
-        && !matches!(get(top, "type"), Some(Val::Str(s)) if s == "object")
-    {
+    let root_ok = match get(top, "type") {
+        None => true,
+        Some(Val::Str(s)) => s == "object",
+        // A nullable-object root (`["object","null"]`) is a sound
+        // weakening — the kaiv root is always an object namespace.
+        Some(Val::Arr(ts)) => ts.iter().any(|v| matches!(v, Val::Str(s) if s == "object")),
+        _ => false,
+    };
+    if !root_ok {
         return Err(err("root schema must describe an object"));
     }
     ctx.object_props(top, "", 0)?;
@@ -60,7 +76,14 @@ pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
 
 impl<'a> Ctx<'a> {
     fn note(&mut self, msg: &str) {
-        self.body.push_str(&format!("// dropped: {msg}\n"));
+        // A note is one `//` comment line; strip control characters so
+        // embedded user text (a pattern, a property name) cannot split
+        // it into a second, malformed line.
+        let clean: String = msg
+            .chars()
+            .map(|c| if matches!(c, '\n' | '\r' | '\0') { ' ' } else { c })
+            .collect();
+        self.body.push_str(&format!("// dropped: {clean}\n"));
     }
 
     /// Resolve a schema node: follow a local `$ref` chain (cloning —
@@ -193,7 +216,12 @@ impl<'a> Ctx<'a> {
                     }
                 }
                 if !names.is_empty() {
-                    self.body.push_str(&format!("!{}\n", names.join("|")));
+                    let null = if required || names.contains(&"null") {
+                        ""
+                    } else {
+                        "null|"
+                    };
+                    self.body.push_str(&format!("!{null}{}\n", names.join("|")));
                     self.emit_kv(path, &key, required, so);
                     return Ok(());
                 }
@@ -295,7 +323,11 @@ impl<'a> Ctx<'a> {
                                             ));
                                             continue;
                                         };
-                                        self.scalar_annotation(iso, t)?;
+                                        self.scalar_annotation(
+                                            iso,
+                                            t,
+                                            ireq.contains(ip.as_str()),
+                                        )?;
                                         self.body.push_str(&format!(
                                             "{ikey}{}=\n",
                                             if ireq.contains(ip.as_str()) { "" } else { "?" }
@@ -319,7 +351,7 @@ impl<'a> Ctx<'a> {
                                 self.note(&format!("{kw} at {}", disp2(path, prop)));
                             }
                         }
-                        self.scalar_annotation(io, t)?;
+                        self.scalar_annotation(io, t, true)?;
                         self.body.push_str(&format!("{path}/@{key};=\n"));
                         Ok(())
                     }
@@ -330,15 +362,25 @@ impl<'a> Ctx<'a> {
                 }
             }
             [t] if scalar_core(t).is_some() => {
-                self.scalar_annotation(so, t)?;
+                self.scalar_annotation(so, t, required)?;
                 self.emit_kv(path, &key, required, so);
                 Ok(())
             }
             [a, b] | [b, a] if *a == "null" && scalar_core(b).is_some() => {
                 // Nullable scalar: union with constraints on the value
-                // alternative (authored per-alternative attachment).
+                // alternative (authored per-alternative attachment). A
+                // union annotation is one whitespace-free item token, so
+                // whitespace-bearing constraints (a space in a pattern)
+                // cannot join it — drop them, keeping the type.
                 let core = scalar_core(b).unwrap();
-                let cons = self.scalar_constraints(so, b)?;
+                let mut cons = self.scalar_constraints(so, b)?;
+                if cons.contains([' ', '\t']) {
+                    self.note(&format!(
+                        "whitespace-bearing constraints on nullable {} (union items are whitespace-free)",
+                        disp2(path, prop)
+                    ));
+                    cons = String::new();
+                }
                 self.body.push_str(&format!("!null|{core}{cons}\n"));
                 self.emit_kv(path, &key, required, so);
                 Ok(())
@@ -358,8 +400,18 @@ impl<'a> Ctx<'a> {
 
     /// The annotation line for a scalar-typed subschema, mapping the
     /// expressible constraints and noting the dropped ones.
-    fn scalar_annotation(&mut self, so: &[(String, Val)], t: &str) -> Result<(), PipelineError> {
-        // format date-time/date/time → std/time named types.
+    fn scalar_annotation(
+        &mut self,
+        so: &[(String, Val)],
+        t: &str,
+        required: bool,
+    ) -> Result<(), PipelineError> {
+        // format date-time/date/time → std/time named types. An
+        // optional constrained field with no applicable default is
+        // rejected at schema-compile time
+        // (SchemaOptionalWithoutDefaultError), so optionals become
+        // nullable unions — a sound weakening that gives the
+        // Denormalizer `!null` to materialize for absent instances.
         if t == "string" {
             if let Some(Val::Str(f)) = get(so, "format") {
                 let mapped = match f.as_str() {
@@ -369,19 +421,32 @@ impl<'a> Ctx<'a> {
                     _ => None,
                 };
                 if let Some(name) = mapped {
-                    self.imports.insert("std/time");
-                    self.body.push_str(&format!("&{name}\n"));
+                    if required {
+                        self.imports.insert("std/time");
+                        self.body.push_str(&format!("&{name}\n"));
+                    } else {
+                        self.body.push_str(&format!("!null|std/time/{name}\n"));
+                    }
                     return Ok(());
                 }
                 self.note(&format!("format: {f}"));
             }
         }
         let core = scalar_core(t).unwrap();
-        let cons = self.scalar_constraints(so, t)?;
-        if core == "str" && cons.is_empty() {
-            return Ok(()); // unannotated
+        let mut cons = self.scalar_constraints(so, t)?;
+        // An optional field renders as a `!null|…` union — one
+        // whitespace-free item token — so whitespace-bearing
+        // constraints cannot ride along.
+        if !required && cons.contains([' ', '\t']) {
+            self.note("whitespace-bearing constraints on a nullable field (union items are whitespace-free)");
+            cons = String::new();
         }
-        self.body.push_str(&format!("!{core}{cons}\n"));
+        if core == "str" && cons.is_empty() {
+            return Ok(()); // unannotated (the empty default applies)
+        }
+        let null = if required { "" } else { "!null|" };
+        let bang = if required { "!" } else { "" };
+        self.body.push_str(&format!("{null}{bang}{core}{cons}\n"));
         Ok(())
     }
 
@@ -410,72 +475,108 @@ impl<'a> Ctx<'a> {
                 }
             }
         }
-        if let Some(Val::Str(p)) = get(so, "pattern") {
-            // Escape-aware: only unescaped slashes gain the `\/`
-            // spelling -- a source `\/` must not double-escape.
-            let mut body = String::new();
-            let mut esc = false;
-            for c in p.chars() {
-                if esc {
-                    body.push(c);
-                    esc = false;
-                } else if c == '\\' {
-                    body.push('\\');
-                    esc = true;
-                } else if c == '/' {
-                    body.push_str("\\/");
-                } else {
-                    body.push(c);
+        // JSON Schema keywords are type-scoped: only emit a constraint
+        // when the source schema's instance type implies it, else a
+        // stray `minimum` on a string would invent a bogus range.
+        if t == "string" {
+            if let Some(Val::Str(p)) = get(so, "pattern") {
+                // Escape-aware: only unescaped slashes gain the `\/`
+                // spelling -- a source `\/` must not double-escape.
+                let mut body = String::new();
+                let mut esc = false;
+                for c in p.chars() {
+                    if esc {
+                        body.push(c);
+                        esc = false;
+                    } else if c == '\\' {
+                        body.push('\\');
+                        esc = true;
+                    } else if c == '/' {
+                        body.push_str("\\/");
+                    } else {
+                        body.push(c);
+                    }
                 }
-            }
-            if !p.contains('\'') && crate::rex::Regex::new(&body).is_some() {
-                out.push_str(&format!("/{body}/"));
-            } else {
-                self.note(&format!("pattern outside the kaiv regex dialect: {p}"));
+                // Reject `'` and every C0 control: a newline would
+                // split the emitted annotation line, and other controls
+                // produce a .saiv that fails to compile.
+                if !p.contains('\'')
+                    && !p.chars().any(|c| c < ' ')
+                    && crate::rex::Regex::new(&body).is_some()
+                {
+                    out.push_str(&format!("/{body}/"));
+                } else {
+                    self.note(&format!("pattern outside the kaiv regex dialect: {p}"));
+                }
             }
         }
         // Numeric bounds; exclusive bounds are exact for integers.
-        let num = |v: &Val| match v {
-            Val::Num(n) => Some(n.clone()),
-            _ => None,
-        };
-        let int_shift = |v: &Val, delta: i64| match v {
-            Val::Num(n) => n.parse::<i64>().ok().map(|i| (i + delta).to_string()),
-            _ => None,
-        };
-        let mut lo = get(so, "minimum").and_then(num);
-        let mut hi = get(so, "maximum").and_then(num);
-        if let Some(v) = get(so, "exclusiveMinimum") {
-            match (t, int_shift(v, 1)) {
-                ("integer", Some(shifted)) => lo = Some(shifted),
-                _ => self.note("exclusiveMinimum (inexact for kaiv inclusive ranges)"),
+        if t == "integer" || t == "number" {
+            let num = |v: &Val| match v {
+                Val::Num(n) => Some(n.clone()),
+                _ => None,
+            };
+            let int_shift = |v: &Val, delta: i64| match v {
+                Val::Num(n) => n
+                    .parse::<i64>()
+                    .ok()
+                    .and_then(|i| i.checked_add(delta))
+                    .map(|i| i.to_string()),
+                _ => None,
+            };
+            let mut lo = get(so, "minimum").and_then(num);
+            let mut hi = get(so, "maximum").and_then(num);
+            if let Some(v) = get(so, "exclusiveMinimum") {
+                match (t, int_shift(v, 1)) {
+                    ("integer", Some(shifted)) => lo = Some(shifted),
+                    _ => self.note("exclusiveMinimum (inexact for kaiv inclusive ranges)"),
+                }
             }
-        }
-        if let Some(v) = get(so, "exclusiveMaximum") {
-            match (t, int_shift(v, -1)) {
-                ("integer", Some(shifted)) => hi = Some(shifted),
-                _ => self.note("exclusiveMaximum (inexact for kaiv inclusive ranges)"),
+            if let Some(v) = get(so, "exclusiveMaximum") {
+                match (t, int_shift(v, -1)) {
+                    ("integer", Some(shifted)) => hi = Some(shifted),
+                    _ => self.note("exclusiveMaximum (inexact for kaiv inclusive ranges)"),
+                }
             }
-        }
-        if lo.is_some() || hi.is_some() {
-            out.push_str(&format!(
-                "[{},{}]",
-                lo.unwrap_or_default(),
-                hi.unwrap_or_default()
-            ));
+            if lo.is_some() || hi.is_some() {
+                out.push_str(&format!(
+                    "[{},{}]",
+                    lo.unwrap_or_default(),
+                    hi.unwrap_or_default()
+                ));
+            }
         }
         // Length bounds.
-        let ilen = |k: &str| match get(so, k) {
-            Some(Val::Num(n)) => n.parse::<u64>().ok(),
-            _ => None,
-        };
-        let (minl, maxl) = (ilen("minLength"), ilen("maxLength"));
-        if minl.is_some() || maxl.is_some() {
-            out.push_str(&format!(
-                "#[{},{}]",
-                minl.map(|v| v.to_string()).unwrap_or_default(),
-                maxl.map(|v| v.to_string()).unwrap_or_default()
-            ));
+        if t == "string" {
+            let ilen = |k: &str| match get(so, k) {
+                Some(Val::Num(n)) => n.parse::<u64>().ok(),
+                _ => None,
+            };
+            let (minl, maxl) = (ilen("minLength"), ilen("maxLength"));
+            if minl.is_some() || maxl.is_some() {
+                out.push_str(&format!(
+                    "#[{},{}]",
+                    minl.map(|v| v.to_string()).unwrap_or_default(),
+                    maxl.map(|v| v.to_string()).unwrap_or_default()
+                ));
+            }
+        }
+        // Cross-type keywords are vacuous per JSON Schema semantics —
+        // dropped, but noted per the converter's convention.
+        if t != "string"
+            && ["pattern", "minLength", "maxLength"]
+                .iter()
+                .any(|k| get(so, k).is_some())
+        {
+            self.note(&format!("string-only constraints on a {t} property"));
+        }
+        if t != "integer"
+            && t != "number"
+            && ["minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"]
+                .iter()
+                .any(|k| get(so, k).is_some())
+        {
+            self.note(&format!("numeric bounds on a {t} property"));
         }
         Ok(out)
     }
@@ -567,8 +668,9 @@ fn disp2(path: &str, prop: &str) -> String {
     format!("{}/{prop}", disp(path))
 }
 
-/// Property name → kaiv key (bare or quoted).
-fn kaiv_key(key: &str) -> Result<String, PipelineError> {
+/// Property name → kaiv key (bare or quoted) — shared by every
+/// schema converter.
+pub(crate) fn kaiv_key(key: &str) -> Result<String, PipelineError> {
     if key.contains(['\n', '\r', '\0']) || key.is_empty() {
         return Err(err(format!("unrepresentable property name: {key:?}")));
     }
@@ -597,6 +699,76 @@ mod tests {
     }
 
     #[test]
+    fn non_object_root_rejected() {
+        assert!(import(br#"{"type":"array","items":{"type":"string"}}"#, "t").is_err());
+        assert!(import(br#"{"type":"string"}"#, "t").is_err());
+    }
+
+    #[test]
+    fn nullable_object_root_accepted() {
+        assert!(import(br#"{"type":["object","null"],"properties":{}}"#, "t").is_ok());
+    }
+
+    #[test]
+    fn cross_type_constraints_dropped() {
+        // A `minimum` on a string type must not emit a numeric range.
+        let saiv = import(
+            br#"{"type":"object","properties":{"x":{"type":"string","minimum":10}}}"#,
+            "t",
+        )
+        .unwrap();
+        assert!(!saiv.contains("[10,"), "{saiv}");
+        let _ = compiles(&saiv);
+        // A `maxLength` on an integer must not emit a length constraint.
+        let saiv2 = import(
+            br#"{"type":"object","properties":{"y":{"type":"integer","maxLength":2}}}"#,
+            "t",
+        )
+        .unwrap();
+        assert!(!saiv2.contains("#["), "{saiv2}");
+    }
+
+    #[test]
+    fn exclusive_bound_overflow_noted() {
+        // i64::MAX exclusiveMinimum must not panic (checked add).
+        assert!(import(
+            br#"{"type":"object","properties":{"x":{"type":"integer","exclusiveMinimum":9223372036854775807}}}"#,
+            "t",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn space_pattern_on_nullable_field_drops_not_corrupts() {
+        // A space-bearing pattern is fine bare (required field) but
+        // cannot join a `!null|` union; both outputs must compile.
+        let opt = import(
+            br#"{"type":"object","properties":{"x":{"type":"string","pattern":"a b"}}}"#,
+            "t",
+        )
+        .unwrap();
+        let _ = compiles(&opt);
+        let req = import(
+            br#"{"type":"object","required":["x"],"properties":{"x":{"type":"string","pattern":"a b"}}}"#,
+            "t",
+        )
+        .unwrap();
+        assert!(req.contains("/a b/"), "{req}");
+        let _ = compiles(&req);
+    }
+
+    #[test]
+    fn pattern_with_newline_dropped() {
+        let saiv = import(
+            br#"{"type":"object","properties":{"x":{"type":"string","pattern":"a\nb"}}}"#,
+            "t",
+        )
+        .unwrap();
+        // The emitted schema still compiles (no split annotation line).
+        let _ = compiles(&saiv);
+    }
+
+    #[test]
     fn core_mapping() {
         let src = br#"{
             "type": "object",
@@ -618,24 +790,34 @@ mod tests {
             }
         }"#;
         let saiv = import(src, "acme/svc").unwrap();
-        assert!(saiv.starts_with(".!kaivschema 1 acme/svc\n.!types std/time\n"));
+        // `when` is optional, so std/time joins as a fully-qualified
+        // union alternative rather than an `&name` + import.
+        assert!(saiv.starts_with(".!kaivschema 1 acme/svc\n"));
         assert!(saiv.contains("// Service name\nname=\n"));
         assert!(saiv.contains("!int[1,65535]\nport=8080\n"));
         // exclusiveMinimum on number: dropped with a note.
         assert!(saiv.contains("// dropped: exclusiveMinimum"));
-        assert!(saiv.contains("!float\nratio?=\n"));
-        assert!(saiv.contains("!str{gold,silver}\ntier?=\n"));
+        assert!(saiv.contains("!null|float\nratio?=\n"));
+        assert!(saiv.contains("!null|str{gold,silver}\ntier?=\n"));
         assert!(saiv.contains("!null|str#[,80]\nnote?=\n"));
-        assert!(saiv.contains("&datetime\nwhen?=\n"));
+        assert!(saiv.contains("!null|std/time/datetime\nwhen?=\n"));
         assert!(saiv.contains("!map<str>\nlabels?=\n"));
         assert!(saiv.contains("/@tags;=\n"));
-        assert!(saiv.contains("[/@servers]\nhost=\n!int\nport?=\n[]\n"));
-        assert!(saiv.contains("!int\n/limits::rps?=\n"));
+        assert!(saiv.contains("[/@servers]\nhost=\n!null|int\nport?=\n[]\n"));
+        assert!(saiv.contains("!null|int\n/limits::rps?=\n"));
         // The result is a compilable schema.
         let sc = compiles(&saiv);
         // And a conforming document validates.
-        let daiv = ".!kaiv 1\n!str'::name=api\n!int'::port=443\n!str'::tier=gold\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!str'/@tags::0=a\n!str'/@servers/0::host=h\n!int'/limits::rps=5\n";
-        assert_eq!(crate::validate(daiv, &sc), Ok(()));
+        // The Denormalizer materializes the absent optional fields
+        // (null alternatives) so the strict-lockstep scan passes.
+        let r = crate::Resolver::offline();
+        let csaiv = crate::compile_schema(saiv.as_bytes()).unwrap();
+        r.preload("acme/svc", "csaiv", csaiv.into_bytes());
+        let authored = ".!kaiv 1\n.!schema:acme/svc\n!str'::name=api\n!int'::port=443\n!str'::tier=gold\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!str'/@tags::0=a\n!str'/@servers/0::host=h\n!int'/limits::rps=5\n";
+        let daiv = crate::denorm::denormalize_with(authored, &r).unwrap();
+        assert!(daiv.contains("!null'::ratio=\n"));
+        assert!(daiv.contains("!null'/@servers/0::port=\n"));
+        assert_eq!(crate::validate(&daiv, &sc), Ok(()));
         // Required enforced; constraint enforced.
         assert_eq!(
             crate::validate(".!kaiv 1\n!str'::name=api\n", &sc),
@@ -664,7 +846,7 @@ mod tests {
             }
         }"#;
         let saiv = import(src, "acme/s").unwrap();
-        assert!(saiv.contains("!str/^a\\/b$/\npre?=\n"));
+        assert!(saiv.contains("!null|str/^a\\/b$/\npre?=\n"));
         assert!(saiv.contains("// dropped: pattern outside the kaiv regex dialect: ^(a)\\1$"));
         assert!(saiv.contains("// dropped: pattern outside the kaiv regex dialect: ^\\w+$"));
         assert!(saiv.contains("// dropped: unrepresentable property name"));
@@ -672,7 +854,10 @@ mod tests {
         // The result compiles and accepts a conforming document.
         let sc = compiles(&saiv);
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::pre=a/b\n!str'::re=x\n", &sc),
+            crate::validate(
+                ".!kaiv 1\n!str'::pre=a/b\n!str'::backref=\n!str'::shorthand=\n!str'::re=x\n",
+                &sc
+            ),
             Ok(())
         );
     }
@@ -717,8 +902,8 @@ mod tests {
             "$defs": {"ident": {"type": "string", "pattern": "^[a-z]+$"}}
         }"##;
         let saiv = import(src, "t").unwrap();
-        assert!(saiv.contains("!str/^[a-z]+$/\nid?=\n"));
-        assert!(saiv.contains("!int|str\nmode?=\n"));
+        assert!(saiv.contains("!null|str/^[a-z]+$/\nid?=\n"));
+        assert!(saiv.contains("!null|int|str\nmode?=\n"));
         compiles(&saiv);
     }
 

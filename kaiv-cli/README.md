@@ -17,16 +17,26 @@ kaiv build    [file.kaiv]         authored -> .daiv (compile + denorm)
 kaiv schema   [file.saiv]         authored schema -> compiled (.csaiv)
 kaiv validate <data> <schema>     validate data against a schema
 kaiv unit     <expr>              canonicalize a unit expression
-kaiv import   [--FORMAT] [file]   JSON/YAML/TOML -> authored .kaiv
-kaiv export   --FORMAT [file]     canonical kaiv -> JSON/YAML/TOML
+kaiv import   [--FORMAT] [file]   foreign format -> authored .kaiv
+kaiv export   --FORMAT [file]     canonical kaiv -> foreign format
 kaiv infer    [--name ID] [file]  infer an authored .saiv from data
-kaiv import-schema [--name] [f]   JSON Schema -> authored .saiv
+kaiv import-schema [--name] [f]   foreign schema -> authored .saiv
+                                  (JSON Schema, .proto, .avsc,
+                                  GraphQL SDL, .xsd)
 ```
 
-The single-file commands read stdin when no file is given; `import`
-infers the format from the file extension (`--json`/`--yaml`/`--toml`
-required for stdin). `validate` accepts authored or foreign-format
-data and authored or compiled schemas, converting as needed.
+Formats: `--json` `--yaml` `--toml` `--xml` `--cbor` `--avro`
+`--proto` `--asn1`, inferred from the file extension (`.json`
+`.yaml` `.yml` `.toml` `.xml` `.cbor` `.avro` `.pb` `.binpb` `.der`
+`.pem` `.crt` `.cer`); the option is required for stdin. The binary
+formats (cbor, avro, proto, asn1) write raw bytes to stdout on
+export. Protocol Buffers wire data is not self-describing: pass
+`--schema <file.proto>` (and `--message <Name>` when the schema has
+several top-level messages). ASN.1 input may be raw BER/DER or
+PEM-armored; export writes DER. The single-file commands read
+stdin when no file is given. `validate` accepts authored or
+foreign-format data and authored or compiled schemas, converting
+as needed.
 
 Type, schema, and unit resolution is configured by the nearest
 `kaiv.kaiv` (itself a kaiv file) found from the working directory

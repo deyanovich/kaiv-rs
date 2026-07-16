@@ -63,6 +63,11 @@ pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
         for (i, &c) in chunk.iter().enumerate() {
             n |= val(c)? << (18 - 6 * i);
         }
+        // Non-canonical trailing bits (RFC 4648 §3.5) are tolerated by
+        // discarding them: the spec pins validation to the base64url
+        // SHAPE and nothing more, so the compiler and validator accept
+        // `aR` — an exporter rejecting it would break the pipeline's
+        // emit-what-you-accept closure.
         out.push((n >> 16) as u8);
         if chunk.len() >= 3 {
             out.push((n >> 8) as u8);
@@ -262,6 +267,11 @@ impl<'a> P<'a> {
             .get(self.i..self.i + 4)
             .ok_or_else(|| err("truncated \\u escape"))?;
         self.i += 4;
+        // RFC 8259 requires exactly four hex digits; from_str_radix
+        // otherwise tolerates a leading `+` (e.g. `\u+041`).
+        if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(err("invalid \\u escape"));
+        }
         u32::from_str_radix(h, 16).map_err(|_| err("invalid \\u escape"))
     }
 
@@ -751,11 +761,166 @@ pub(crate) fn json_number_ok(s: &str) -> bool {
 
 /// A JSON number token for a finite f64, keeping floats float-shaped
 /// (`5.0`, not `5` — the type distinction feeds kaiv annotations).
+/// A float-shaped token for a finite double. Whole values keep a
+/// `.0` (or exponent form beyond 1e16 — `Display` alone would print
+/// hundreds of bare digits and silently turn the token
+/// integer-shaped); fractional values only occur below 2^53, where
+/// `Display` is exact and always carries a point.
 pub(crate) fn float_token(f: f64) -> String {
-    if f.fract() == 0.0 && f.abs() < 1e16 {
+    if f.fract() != 0.0 {
+        format!("{f}")
+    } else if f.abs() < 1e16 {
         format!("{f:.1}")
     } else {
-        format!("{f}")
+        format!("{f:e}")
+    }
+}
+
+// ------------------------------------------------ binary-format helpers
+
+/// A decoded binary float: finite ones become number tokens,
+/// non-finite ones ride the typed channel as `std/num` markers.
+#[cfg(any(feature = "cbor", feature = "avro", feature = "proto"))]
+pub(crate) fn float_val(f: f64) -> Val {
+    if f.is_finite() {
+        return Val::Num(float_token(f));
+    }
+    let (name, text) = if f.is_nan() {
+        ("nan", "nan")
+    } else if f > 0.0 {
+        ("inf", "inf")
+    } else {
+        ("inf", "-inf")
+    };
+    Val::Typed {
+        lib: "std/num".to_string(),
+        name: name.to_string(),
+        text: text.to_string(),
+    }
+}
+
+/// Big-endian magnitude bytes → decimal token (empty bytes are 0).
+#[cfg(any(feature = "cbor", feature = "avro", feature = "asn1"))]
+pub(crate) fn be_bytes_to_decimal(bytes: &[u8]) -> String {
+    let mut digits = vec![0u8]; // little-endian decimal digits
+    for &byte in bytes {
+        let mut carry = byte as u32;
+        for d in digits.iter_mut() {
+            let v = (*d as u32) * 256 + carry;
+            *d = (v % 10) as u8;
+            carry = v / 10;
+        }
+        while carry > 0 {
+            digits.push((carry % 10) as u8);
+            carry /= 10;
+        }
+    }
+    digits.iter().rev().map(|d| (d + b'0') as char).collect()
+}
+
+/// Decimal digits → big-endian magnitude bytes (empty for 0).
+#[cfg(any(feature = "cbor", feature = "avro", feature = "asn1"))]
+pub(crate) fn decimal_to_be_bytes(dec: &str) -> Vec<u8> {
+    let mut bytes: Vec<u8> = Vec::new(); // little-endian
+    for c in dec.bytes() {
+        let mut carry = (c - b'0') as u32;
+        for b in bytes.iter_mut() {
+            let v = (*b as u32) * 10 + carry;
+            *b = (v & 0xff) as u8;
+            carry = v >> 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    bytes.reverse();
+    bytes
+}
+
+/// Big-endian +1, growing on carry out of the top byte.
+#[cfg(any(feature = "cbor", feature = "avro", feature = "asn1"))]
+pub(crate) fn increment(bytes: &mut Vec<u8>) {
+    for i in (0..bytes.len()).rev() {
+        if bytes[i] == 0xff {
+            bytes[i] = 0;
+        } else {
+            bytes[i] += 1;
+            return;
+        }
+    }
+    bytes.insert(0, 1);
+}
+
+/// Two's-complement big-endian value → exact decimal token, with a
+/// decimal point inserted `scale` digits from the right when scale
+/// is nonzero (Avro decimals; ASN.1 INTEGERs use scale 0).
+#[cfg(any(feature = "avro", feature = "asn1"))]
+pub(crate) fn twos_complement_token(bytes: &[u8], scale: usize) -> String {
+    let neg = bytes.first().is_some_and(|b| b & 0x80 != 0);
+    let mag = if neg {
+        let mut m: Vec<u8> = bytes.iter().map(|b| !b).collect();
+        increment(&mut m);
+        m
+    } else {
+        bytes.to_vec()
+    };
+    let mut digits = be_bytes_to_decimal(&mag);
+    let zero = digits == "0";
+    if scale > 0 {
+        if digits.len() <= scale {
+            digits = format!("{}{digits}", "0".repeat(scale + 1 - digits.len()));
+        }
+        digits.insert(digits.len() - scale, '.');
+    }
+    if neg && !zero {
+        format!("-{digits}")
+    } else {
+        digits
+    }
+}
+
+/// Integer-shaped decimal token → minimal two's-complement bytes.
+#[cfg(any(feature = "avro", feature = "asn1"))]
+pub(crate) fn token_to_twos_complement(raw: &str) -> Result<Vec<u8>, PipelineError> {
+    let neg = raw.starts_with('-');
+    let digits = raw.strip_prefix('-').unwrap_or(raw);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(err(format!("not an integer token: {raw}")));
+    }
+    let mut m = decimal_to_be_bytes(digits);
+    if m.is_empty() {
+        return Ok(vec![0]); // zero
+    }
+    if neg {
+        // Negate in place; if the sign bit fails to set, the value
+        // needs one more byte of sign extension.
+        for b in m.iter_mut() {
+            *b = !*b;
+        }
+        increment(&mut m);
+        if m[0] & 0x80 == 0 {
+            m.insert(0, 0xff);
+        }
+        Ok(m)
+    } else {
+        if m[0] & 0x80 != 0 {
+            m.insert(0, 0x00);
+        }
+        Ok(m)
+    }
+}
+
+/// Big-endian -1; the caller guarantees a non-zero value.
+#[cfg(any(feature = "cbor", feature = "avro", feature = "asn1"))]
+pub(crate) fn decrement(bytes: &mut [u8]) {
+    for b in bytes.iter_mut().rev() {
+        if *b == 0 {
+            *b = 0xff;
+        } else {
+            *b -= 1;
+            break;
+        }
     }
 }
 
@@ -807,11 +972,10 @@ pub(crate) fn tree(canonical: &str) -> Result<Node, PipelineError> {
         let rest = &s[tick + 1..];
         let eq = split_eq(rest).ok_or_else(|| err(format!("canonical line without =: {s}")))?;
         let (namepath, value) = (&rest[..eq], &rest[eq + 1..]);
-        if value.starts_with('$') {
-            return Err(err(format!(
-                "unresolved field reference (denormalize first): {value}"
-            )));
-        }
+        // No `$` heuristics: exporter input is .daiv, where values are
+        // truly verbatim (`$5` is a legal literal — the `$$` doubling
+        // was collapsed at denormalization). Relational .raiv is
+        // denormalized by the caller before it reaches an exporter.
         let node = render_node(&a.type_name, value)?;
         insert(&mut root, &segments(namepath)?, node)?;
     }
@@ -861,12 +1025,14 @@ fn split_eq(s: &str) -> Option<usize> {
     None
 }
 
-/// One namepath segment: the unquoted text plus whether it was
-/// quoted — a quoted segment is always a literal name (`"@arr"` is a
-/// field named `@arr`, not an array marker).
+/// One namepath segment: the unquoted text plus whether any part was
+/// quoted. `marker` is true when the segment begins with an unquoted
+/// `@` — the array namespace marker (`@tags`, `@"m:Item"`); a fully
+/// quoted `"@arr"` is a literal field named `@arr`.
 struct Seg {
     text: String,
     quoted: bool,
+    marker: bool,
 }
 
 /// Canonical namepath → segments (quote-aware split on `/` and `::`);
@@ -876,12 +1042,14 @@ fn segments(np: &str) -> Result<Vec<Seg>, PipelineError> {
     let mut segs: Vec<Seg> = Vec::new();
     let mut cur = String::new();
     let mut quoted = false;
+    let mut marker = false;
     let mut q = false;
     let mut i = 0;
-    let mut push = |cur: &mut String, quoted: &mut bool| {
+    let mut push = |cur: &mut String, quoted: &mut bool, marker: &mut bool| {
         segs.push(Seg {
             text: std::mem::take(cur),
             quoted: std::mem::take(quoted),
+            marker: std::mem::take(marker),
         });
     };
     while i < cs.len() {
@@ -895,16 +1063,20 @@ fn segments(np: &str) -> Result<Vec<Seg>, PipelineError> {
                     quoted = true;
                 }
             }
-            '/' if !q => push(&mut cur, &mut quoted),
+            '@' if !q && cur.is_empty() && !quoted => {
+                marker = true;
+                cur.push('@');
+            }
+            '/' if !q => push(&mut cur, &mut quoted, &mut marker),
             ':' if !q && cs.get(i + 1) == Some(&':') => {
-                push(&mut cur, &mut quoted);
+                push(&mut cur, &mut quoted, &mut marker);
                 i += 1;
             }
             c => cur.push(c),
         }
         i += 1;
     }
-    push(&mut cur, &mut quoted);
+    push(&mut cur, &mut quoted, &mut marker);
     segs.retain(|s| !s.text.is_empty());
     if segs.is_empty() {
         return Err(err(format!("empty namepath: {np}")));
@@ -952,6 +1124,19 @@ fn render_node(type_name: &str, value: &str) -> Result<Node, PipelineError> {
             }
             text
         }
+        // Any other std/enc type: the payload stays base64url — its
+        // verbatim canonical value, like std/time datetimes stay
+        // their tokens. Text-tree targets render it as a string;
+        // payload-native exporters (XML splices `xml`, CBOR decodes
+        // `bin` to a byte string) reconstruct from it.
+        name if name.starts_with("std/enc/") => {
+            b64url_decode(value).ok_or_else(|| err("invalid base64url payload"))?;
+            return Ok(Node::Typed {
+                lib: "std/enc".to_string(),
+                name: name["std/enc/".len()..].to_string(),
+                text: value.to_string(),
+            });
+        }
         _ => json_string(value),
     };
     Ok(Node::Leaf(leaf))
@@ -959,12 +1144,23 @@ fn render_node(type_name: &str, value: &str) -> Result<Node, PipelineError> {
 
 fn insert(node: &mut Node, segs: &[Seg], leaf: Node) -> Result<(), PipelineError> {
     let (head, rest) = segs.split_first().expect("segments are non-empty");
-    // Only an unquoted `@` marks an array namespace; a quoted segment
-    // is a literal field name whatever it contains.
-    if let Some(name) = head.text.strip_prefix('@').filter(|_| !head.quoted) {
-        let slot = obj_slot(node, name)?;
-        if !matches!(slot, Node::Arr(_)) {
-            *slot = Node::Arr(Vec::new());
+    // Only an unquoted leading `@` marks an array namespace (the name
+    // itself may be quoted: `@"m:Item"`); a fully quoted segment is a
+    // literal field name whatever it contains.
+    if head.marker {
+        let slot = obj_slot(node, &head.text[1..])?;
+        // Mirror the object-side collision guards: only a fresh (empty
+        // Obj) slot may become an array; a prior leaf or populated
+        // namespace under the same name is a collision.
+        match slot {
+            Node::Arr(_) => {}
+            Node::Obj(p) if p.is_empty() => *slot = Node::Arr(Vec::new()),
+            _ => {
+                return Err(err(format!(
+                    "namespace/leaf collision at {}",
+                    &head.text[1..]
+                )))
+            }
         }
         let Node::Arr(items) = slot else {
             unreachable!()
@@ -976,28 +1172,71 @@ fn insert(node: &mut Node, segs: &[Seg], leaf: Node) -> Result<(), PipelineError
             .text
             .parse::<usize>()
             .ok()
-            .filter(|_| !idx_seg.quoted)
+            // Only the canonical spelling addresses an element — a
+            // leading-zero index must not silently alias (`00` → 0).
+            .filter(|_| {
+                !idx_seg.quoted && (idx_seg.text.len() == 1 || !idx_seg.text.starts_with('0'))
+            })
             .ok_or_else(|| err(format!("bad array index: {}", idx_seg.text)))?;
+        // Canonical arrays are contiguous (the denormalizer emits
+        // ascending 0-based indices), so a gap is malformed input, not
+        // a reason to fill billions of null placeholders (OOM).
+        if idx > items.len() {
+            return Err(err(format!(
+                "array index {idx} leaves a gap (canonical arrays are contiguous)"
+            )));
+        }
+        // A placeholder exists only for the element being appended
+        // right now; any pre-existing element is real data.
+        let fresh = idx == items.len();
         while items.len() <= idx {
             items.push(Node::Leaf("null".to_string()));
         }
         if rest2.is_empty() {
-            items[idx] = leaf;
+            match &items[idx] {
+                Node::Obj(p) if !p.is_empty() => {
+                    return Err(err(format!("namespace/leaf collision at element {idx}")))
+                }
+                Node::Arr(_) => {
+                    return Err(err(format!("namespace/leaf collision at element {idx}")))
+                }
+                _ => items[idx] = leaf,
+            }
             Ok(())
         } else {
+            // Descend: legit into an Obj (deeper revisit) or into the
+            // just-pushed placeholder; a real leaf element here is a
+            // collision.
             if !matches!(items[idx], Node::Obj(_)) {
+                if !fresh {
+                    return Err(err(format!("namespace/leaf collision at element {idx}")));
+                }
                 items[idx] = Node::Obj(Vec::new());
             }
             insert(&mut items[idx], rest2, leaf)
         }
     } else if rest.is_empty() {
         let slot = obj_slot(node, &head.text)?;
-        *slot = leaf;
-        Ok(())
+        // Assigning a scalar where a populated namespace/array already
+        // stands is a collision, not a silent clobber. A freshly created
+        // empty Obj is the normal new-scalar-field case and passes.
+        match slot {
+            Node::Obj(p) if !p.is_empty() => {
+                Err(err(format!("namespace/leaf collision at {}", head.text)))
+            }
+            Node::Arr(_) => Err(err(format!("namespace/leaf collision at {}", head.text))),
+            _ => {
+                *slot = leaf;
+                Ok(())
+            }
+        }
     } else {
         let slot = obj_slot(node, &head.text)?;
+        // Descending into a slot already holding a scalar/typed value is
+        // a collision (a prior leaf assignment), not something to
+        // overwrite with an empty namespace.
         if !matches!(slot, Node::Obj(_)) {
-            *slot = Node::Obj(Vec::new());
+            return Err(err(format!("namespace/leaf collision at {}", head.text)));
         }
         insert(slot, rest, leaf)
     }
@@ -1057,6 +1296,58 @@ mod tests {
         }
         assert!(b64url_decode("a").is_none()); // len % 4 == 1
         assert!(b64url_decode("ab=c").is_none()); // padding rejected
+        // Non-canonical trailing bits decode tolerantly (validation is
+        // shape-only, so `aR` flows through the whole pipeline).
+        assert_eq!(b64url_decode("aR"), Some(vec![0x69]));
+        assert_eq!(b64url_decode("aQ"), Some(vec![0x69]));
+    }
+
+    #[test]
+    fn array_index_gap_and_collision_rejected() {
+        // Huge index (OOM before the fix) and a gap are both rejected.
+        assert!(export(".!kaiv 1\n!str'/@a::18446744073709551615=x\n").is_err());
+        assert!(export(".!kaiv 1\n!int'/@a::0=1\n!int'/@a::5=2\n").is_err());
+        // Contiguous indices still export.
+        assert!(export(".!kaiv 1\n!int'/@a::0=1\n!int'/@a::1=2\n").is_ok());
+        // A leading-zero index must not silently alias element 0.
+        assert!(export(".!kaiv 1\n!int'/@a::0=1\n!int'/@a::00=2\n").is_err());
+        // Namespace/leaf collision, both orders.
+        assert!(export(".!kaiv 1\n!str'::a=x\n!str'/a::b=y\n").is_err());
+        assert!(export(".!kaiv 1\n!str'/a::b=y\n!str'::a=x\n").is_err());
+        // A normal multi-field namespace still exports.
+        assert!(export(".!kaiv 1\n!str'/a/b::c=1\n!str'/a/d::e=2\n").is_ok());
+    }
+
+    #[test]
+    fn json_u_escape_rejects_sign() {
+        assert!(import(br#"{"k":"\u+041"}"#).is_err());
+        assert!(import(br#"{"k":"A"}"#).is_ok());
+    }
+
+    #[test]
+    fn daiv_values_are_verbatim_including_dollar() {
+        // `$5` is a legal .daiv literal (the `$$` doubling collapsed at
+        // denormalization) — exporters must not mistake it for an
+        // unresolved reference.
+        let out = export(".!kaiv 1\n!str'::price=$5\n").unwrap();
+        assert!(out.contains("\"$5\""), "{out}");
+    }
+
+    #[test]
+    fn compile_export_closure_holds_for_noncanonical_b64() {
+        // Validation is shape-only, so `aR` flows through compile; the
+        // export path must accept its own pipeline's output.
+        let daiv = crate::compile(b".!kaiv 1\n.!types std/enc\n&bin\nb=aR\n").unwrap();
+        assert!(export(&daiv).is_ok());
+    }
+
+    #[test]
+    fn array_object_collisions_error_in_both_orders() {
+        assert!(export(".!kaiv 1\n!str'::a=x\n!str'/@a::0=y\n").is_err());
+        assert!(export(".!kaiv 1\n!str'/@a/0::x=1\n!str'/@a::0=y\n").is_err());
+        assert!(export(".!kaiv 1\n!str'/@a::0=y\n!str'/@a/0::x=1\n").is_err());
+        // A deeper revisit of an element namespace is legitimate.
+        assert!(export(".!kaiv 1\n!str'/@a/0::x=1\n!str'/@a/1::y=2\n!str'/@a/0/sub::z=3\n").is_ok());
     }
 
     #[test]
@@ -1335,6 +1626,20 @@ mod tests {
         // marker (export's segment walk is quote-aware).
         let src = br#"{"@arr":"at","a=b":"eq","a/b":"sl","a::b":"pr","min":1,"re":"r"}"#;
         let authored = import(src).unwrap();
+        let raiv = crate::compile(authored.as_bytes()).unwrap();
+        let daiv = crate::denorm::denormalize(&raiv).unwrap();
+        let back = export(&daiv).unwrap();
+        assert_eq!(back.trim_end().as_bytes(), src.as_slice());
+    }
+
+    #[test]
+    fn quoted_key_arrays_roundtrip() {
+        // An array under a key needing quotes compiles to an
+        // `@"name"` segment: the marker is outside the quotes and
+        // must still read as an array on export.
+        let src = br#"{"m:Item":[{"c":"EUR","t":"Apples"},{"c":"EUR","t":"Pears"}],"a b":[1,2]}"#;
+        let authored = import(src).unwrap();
+        assert!(authored.contains("/@\"m:Item\"+:=c=EUR|t=Apples\n"));
         let raiv = crate::compile(authored.as_bytes()).unwrap();
         let daiv = crate::denorm::denormalize(&raiv).unwrap();
         let back = export(&daiv).unwrap();

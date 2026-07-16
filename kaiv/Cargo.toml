@@ -3,13 +3,13 @@ name = "kaiv"
 # 0.2.0: complete rewrite. 0.1.0 was the Era 1 "kv format" CLI tool;
 # this is the library-only reference implementation of the current
 # kaiv format (Levels 0-2), with the CLI split into `kaiv-cli`.
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.84.0"
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/kaiv-format/kaiv-rs"
 authors = ["Bojan Đuričković"]
-description = "Reference implementation of the kaiv format (Levels 0-2): lexer, compiler, denormalizer, schema compiler, validator"
+description = "Reference implementation of the kaiv format (Levels 0-3): lexer, compiler, denormalizer, schema compiler, validator"
 keywords = ["kaiv", "configuration", "schema", "validation", "serialization"]
 categories = ["parser-implementations", "encoding", "config", "data-structures"]
 readme = "../README.md"
@@ -23,10 +23,32 @@ exclude = ["tests"]
 all-features = true
 
 [features]
+# Layer 3/4 network resolution. On by default; disable (
+# default-features = false) for embedded/offline builds — the core
+# pipeline itself has no dependencies.
+default = ["net", "collation"]
+net = ["dep:ureq"]
 json = []
 yaml = ["json", "dep:yaml-rust2"]
 toml = ["json", "dep:toml"]
+xml = ["json"]
+cbor = ["json"]
+avro = ["json"]
+proto = ["json"]
+asn1 = ["json"]
+graphql = ["json"]
+xsd = ["xml"]
+# Level 3 locale-aware collation (`..lex[locale]`) via ICU4X. On by
+# default; the embedded CLDR data grows the binary, so disable
+# (default-features = false) for a lean Level 0-2 runtime.
+collation = ["dep:icu_collator", "dep:icu_locale_core"]
 
 [dependencies]
+# `~` pins the minor line: the ICU4X 2.1 line embeds CLDR 48 data
+# (the spec's pinned reference version, SPEC.md § Reference
+# Collation) and is the last line within rust-version 1.84.
+icu_collator = { version = "~2.1", optional = true }
+icu_locale_core = { version = "~2.1", optional = true }
 toml = { version = "1.1.2", features = ["preserve_order"], optional = true }
+ureq = { version = "3.3", optional = true, default-features = false, features = ["rustls"] }
 yaml-rust2 = { version = "0.11.0", optional = true }

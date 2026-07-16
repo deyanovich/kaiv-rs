@@ -198,11 +198,16 @@ pub fn parse_annotation(s: &str) -> Option<Annotation> {
                 a.unit = Some(u);
             }
             '?' => {
-                // Provenance lists contain no whitespace; trailing
-                // re-literals may follow, space-separated.
+                // Provenance lists contain no whitespace — and no
+                // `'`: that is the canonical machine-form delimiter
+                // (`!int?src#dpid'path=value`), so stopping there
+                // keeps a canonical data line from parsing as a
+                // full-line annotation (it must classify as rule-5
+                // content). Trailing re-literals may follow,
+                // space-separated.
                 i += 1;
                 let start = i;
-                while i < cs.len() && !matches!(cs[i], ' ' | '\t') {
+                while i < cs.len() && !matches!(cs[i], ' ' | '\t' | '\'') {
                     i += 1;
                 }
                 a.provenance = Some(cs[start..i].iter().collect());
@@ -286,6 +291,14 @@ fn read_range(cs: &[char], i: &mut usize) -> Option<Constraint> {
     *i += 1;
     let (lo, hi) = body.split_once(',')?;
 
+    // ep-char forbids apostrophe, space, tab, and comma in an endpoint
+    // (`]` cannot appear here); an empty endpoint is a valid half-open
+    // bound. Reject otherwise so the compiled constraint re-lexes.
+    let ep_ok = |s: &str| s.is_empty() || !s.contains(['\'', ' ', '\t', ',']);
+    if !ep_ok(lo) || !ep_ok(hi) {
+        return None;
+    }
+
     // a range without a comma is invalid
     let opt = |s: &str| {
         if s.is_empty() {
@@ -312,9 +325,14 @@ fn read_enum(cs: &[char], i: &mut usize) -> Option<Constraint> {
     if body.is_empty() {
         return None;
     }
-    Some(Constraint::Enum(
-        body.split(',').map(str::to_string).collect(),
-    ))
+    let members: Vec<String> = body.split(',').map(str::to_string).collect();
+    // em-char forbids apostrophe, space, and tab in a member (comma is
+    // the separator, `}` cannot appear); reject so an apostrophe in an
+    // enum can't break the first-tick split at validation time.
+    if members.iter().any(|m| m.contains(['\'', ' ', '\t'])) {
+        return None;
+    }
+    Some(Constraint::Enum(members))
 }
 
 /// `re{sep}body{sep}` — the alternative-delimiter authored pattern
@@ -406,6 +424,61 @@ pub enum Item {
     Constraint(Constraint),
 }
 
+/// End of a `!…` annotation token. Whitespace ends the token only at
+/// paren depth 0: a union alternative's lowered `(…)` group may carry
+/// a pattern whose *body* contains spaces, parens, or brackets (e.g.
+/// the std/time datetime pattern's `[Tt ]`), so inside a group the
+/// self-delimiting items — `/pattern/`, `[range]`, `{enum}` — are
+/// skipped as wholes.
+fn anno_token_end(cs: &[char], start: usize) -> usize {
+    let mut i = start;
+    let mut depth = 0usize;
+    while i < cs.len() {
+        match cs[i] {
+            ' ' | '\t' if depth == 0 => break,
+            '(' => {
+                depth += 1;
+                i += 1;
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                i += 1;
+            }
+            '/' if depth > 0 => {
+                // Pattern item inside a group: consume to its
+                // unescaped closing `/` (backslash-escape-aware).
+                i += 1;
+                let mut esc = false;
+                while i < cs.len() {
+                    let c = cs[i];
+                    i += 1;
+                    if esc {
+                        esc = false;
+                    } else if c == '\\' {
+                        esc = true;
+                    } else if c == '/' {
+                        break;
+                    }
+                }
+            }
+            '[' if depth > 0 => {
+                while i < cs.len() && cs[i] != ']' {
+                    i += 1;
+                }
+                i = (i + 1).min(cs.len());
+            }
+            '{' if depth > 0 => {
+                while i < cs.len() && cs[i] != '}' {
+                    i += 1;
+                }
+                i = (i + 1).min(cs.len());
+            }
+            _ => i += 1,
+        }
+    }
+    i
+}
+
 /// Parse a space-separated constraint line. Patterns may contain
 /// spaces, so this is a sequential scan, not a split.
 pub fn parse_constraint_items(s: &str) -> Option<Vec<Item>> {
@@ -447,9 +520,7 @@ pub fn parse_constraint_items(s: &str) -> Option<Vec<Item>> {
             }
             '!' => {
                 let start = i;
-                while i < cs.len() && cs[i] != ' ' && cs[i] != '\t' {
-                    i += 1;
-                }
+                i = anno_token_end(&cs, i);
                 let tok: String = cs[start..i].iter().collect();
                 let a = parse_annotation(&tok)?;
                 if a.provenance.is_some() {
@@ -483,6 +554,21 @@ pub fn parse_constraint_items(s: &str) -> Option<Vec<Item>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enum_and_range_charset_is_enforced() {
+        // Apostrophe / space in enum members and range endpoints are
+        // outside em-char / ep-char and must be rejected.
+        assert!(parse_constraint_items("{it,it's}").is_none());
+        assert!(parse_constraint_items("{a b}").is_none());
+        assert!(parse_constraint_items("[1, 2]").is_none());
+        assert!(parse_constraint_items("[1,2,3]").is_none());
+        // Clean forms still parse.
+        assert!(parse_constraint_items("{a,b,c}").is_some());
+        assert!(parse_constraint_items("[1,65535]").is_some());
+        assert!(parse_constraint_items("[,5]").is_some());
+        assert!(parse_constraint_items("[5,]").is_some());
+    }
 
     #[test]
     fn unit_grammar_in_annotations() {

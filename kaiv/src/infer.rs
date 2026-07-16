@@ -3,11 +3,12 @@
 //! canonical annotations (str/int/float/bool, std library types via
 //! `&name` + `.!types`); `{int,float}` widens to float and null joins
 //! as a union alternative; scalar arrays become `;=` vector
-//! declarations, namespace arrays become `[/@name]…[]` blocks with
-//! per-element-field optionality (a field missing from some elements
-//! infers `?=`). Shapes outside the compiled subset (nested arrays,
-//! structure inside elements) are skipped with a comment — inferred
-//! schemas are relaxed, so skipped fields still validate.
+//! declarations, namespace arrays become `[/@name]…[]` blocks. A
+//! field missing from some elements is skipped with a comment (the
+//! strict-lockstep parallel scan would fail the source document on a
+//! declared-but-absent field), like every other shape outside the
+//! compiled subset — inferred schemas are relaxed, so skipped fields
+//! still validate.
 
 use crate::error::PipelineError;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,6 +32,12 @@ enum Entry {
         // field → (types, element-presence count), first-seen order.
         fields: Vec<(String, BTreeSet<String>, usize)>,
         elements: BTreeSet<usize>,
+        // Within-element precedence (a came before b in some
+        // element): the validator's per-element scan is ordered, so
+        // the emitted group order must be a supersequence of every
+        // element's own field order.
+        edges: Vec<(String, String)>,
+        last: Option<(usize, String)>,
     },
     Skipped(String),
 }
@@ -102,14 +109,26 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
                         path: path.clone(),
                         fields: Vec::new(),
                         elements: BTreeSet::new(),
+                        edges: Vec::new(),
+                        last: None,
                     });
                     entries.len() - 1
                 });
                 match &mut entries[i] {
                     Entry::Table {
-                        fields, elements, ..
+                        fields,
+                        elements,
+                        edges,
+                        last,
+                        ..
                     } => {
                         elements.insert(idx);
+                        if let Some((li, lf)) = last {
+                            if *li == idx && *lf != field {
+                                edges.push((lf.clone(), field.clone()));
+                            }
+                        }
+                        *last = Some((idx, field.clone()));
                         match fields.iter_mut().find(|(f, _, _)| *f == field) {
                             Some((_, tys, count)) => {
                                 tys.insert(ty);
@@ -138,7 +157,7 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
     for e in &entries {
         match e {
             Entry::Scalar { key, tys } => {
-                body.push_str(&field_lines(key, tys, false, &mut imports));
+                body.push_str(&field_lines(key, tys, &mut imports));
             }
             Entry::Vector { path, tys } => {
                 let anno = anno_line(tys, &mut imports);
@@ -148,11 +167,36 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
                 path,
                 fields,
                 elements,
+                edges,
+                ..
             } => {
+                // The validator scans each element's fields in group
+                // order, so the group must order-embed every element.
+                let Some(order) = topo_order(fields, edges) else {
+                    body.push_str(&format!(
+                        "// skipped (inconsistent element field order): {path}\n"
+                    ));
+                    continue;
+                };
                 body.push_str(&format!("[{path}]\n"));
-                for (field, tys, count) in fields {
-                    let optional = *count < elements.len();
-                    body.push_str(&field_lines(field, tys, optional, &mut imports));
+                for i in order {
+                    let (field, tys, count) = &fields[i];
+                    if *count < elements.len() {
+                        // A sometimes-present element field can no
+                        // longer be declared `?=`: the parallel scan
+                        // is strict lockstep (materialization
+                        // guarantees presence in schema-built .daiv),
+                        // and this document was built without a
+                        // schema. Leave the field undefined — relaxed
+                        // schemas skip undefined data lines, so the
+                        // source document still self-validates.
+                        body.push_str(&format!(
+                            "// skipped (present on {count} of {} elements): {field}\n",
+                            elements.len()
+                        ));
+                        continue;
+                    }
+                    body.push_str(&field_lines(field, tys, &mut imports));
                 }
                 body.push_str("[]\n");
             }
@@ -170,29 +214,83 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
     Ok(out)
 }
 
-/// annotation line (possibly empty) + `key{?}=`.
-fn field_lines(
-    key: &str,
-    tys: &BTreeSet<String>,
-    optional: bool,
-    imports: &mut BTreeSet<String>,
-) -> String {
+/// A field order consistent with every element's own order — a
+/// deterministic topological sort (first-seen index breaks ties);
+/// None when elements disagree cyclically (x before y in one, y
+/// before x in another), where no single group order can validate
+/// the example.
+fn topo_order(
+    fields: &[(String, BTreeSet<String>, usize)],
+    edges: &[(String, String)],
+) -> Option<Vec<usize>> {
+    let n = fields.len();
+    let idx_of = |name: &str| fields.iter().position(|(f, _, _)| f == name);
+    let mut adj = vec![Vec::new(); n];
+    let mut indeg = vec![0usize; n];
+    let mut seen = BTreeSet::new();
+    for (a, b) in edges {
+        let (Some(i), Some(j)) = (idx_of(a), idx_of(b)) else {
+            continue;
+        };
+        if i == j || !seen.insert((i, j)) {
+            continue;
+        }
+        adj[i].push(j);
+        indeg[j] += 1;
+    }
+    let mut avail: Vec<usize> = (0..n).filter(|i| indeg[*i] == 0).collect();
+    let mut out = Vec::with_capacity(n);
+    while !avail.is_empty() {
+        let pos = avail
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, i)| **i)
+            .map(|(p, _)| p)
+            .expect("non-empty");
+        let i = avail.swap_remove(pos);
+        out.push(i);
+        for &j in &adj[i] {
+            indeg[j] -= 1;
+            if indeg[j] == 0 {
+                avail.push(j);
+            }
+        }
+    }
+    (out.len() == n).then_some(out)
+}
+
+/// annotation line (possibly empty) + `key=`. Inference never emits
+/// `?=`: an inferred schema describes a document built without one,
+/// so a field it declares was observed present — and the strict
+/// lockstep scan would fail the source document on any declared
+/// field it lacks.
+fn field_lines(key: &str, tys: &BTreeSet<String>, imports: &mut BTreeSet<String>) -> String {
     let anno = anno_line(tys, imports);
     // A line-leading bare `re` is the reserved pattern-literal
     // introducer in schema files -- spell the field quoted.
     let key = if key == "re" { "\"re\"" } else { key };
-    format!("{anno}{key}{}=\n", if optional { "?" } else { "" })
+    format!("{anno}{key}=\n")
 }
 
 /// The annotation for an observed type set: `{int,float}` widens to
 /// float, null joins as a union alternative (a lone null infers
 /// nullable string), plain str stays unannotated, and std library
 /// types use `&name` with a `.!types` import.
+///
+/// The widening applies only when the whole set collapses to a plain
+/// `!float`: bare scalar types validate structurally (the float
+/// pattern accepts integer tokens), but unions are tagged — the data
+/// line's type selects an alternative by name, so a union must keep
+/// its `int` alternative alongside `float`.
 fn anno_line(tys: &BTreeSet<String>, imports: &mut BTreeSet<String>) -> String {
     let had_null = tys.contains("null");
     let mut list: Vec<String> = tys.iter().filter(|t| *t != "null").cloned().collect();
-    if list.contains(&"float".to_string()) {
-        list.retain(|t| t != "int"); // widen
+    if !had_null
+        && list.len() == 2
+        && list.contains(&"float".to_string())
+        && list.contains(&"int".to_string())
+    {
+        list.retain(|t| t != "int"); // widen {int,float} -> float
     }
     if list.is_empty() {
         list.push("str".to_string()); // only null observed
@@ -309,7 +407,10 @@ mod tests {
         assert!(saiv.contains("&datetime\nwhen=\n"));
         assert!(saiv.contains("!int\n/@ports;=\n"));
         assert!(saiv.contains("[/@servers]\n"));
-        assert!(saiv.contains("!str\nrole?=\n") || saiv.contains("role?=\n"));
+        // `role` appears on one of two elements: skipped, not `?=` —
+        // the strict-lockstep scan would fail element 0 otherwise.
+        assert!(saiv.contains("// skipped (present on 1 of 2 elements): role\n"));
+        assert!(!saiv.contains("role?="));
         // The example validates against its own inferred schema.
         let c = crate::compile_schema(saiv.as_bytes()).unwrap();
         let sc = crate::parse_csaiv(&c).unwrap();
@@ -318,9 +419,18 @@ mod tests {
 
     #[test]
     fn widening_and_unions() {
+        // {int,float} widens to a plain float only when nothing else
+        // joins the set: bare types validate structurally (the float
+        // pattern accepts int tokens), unions are tagged by name — a
+        // union that dropped `int` would reject its own example.
+        let daiv = ".!kaiv 1\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n";
+        assert!(infer(daiv, "t").unwrap().contains("!float\n/@xs;=\n"));
         let daiv = ".!kaiv 1\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n!null'/@xs::2=\n";
         let saiv = infer(daiv, "t").unwrap();
-        assert!(saiv.contains("!null|float\n/@xs;=\n"));
+        assert!(saiv.contains("!null|float|int\n/@xs;=\n"));
+        let c = crate::compile_schema(saiv.as_bytes()).unwrap();
+        let sc = crate::parse_csaiv(&c).unwrap();
+        assert_eq!(crate::validate(daiv, &sc), Ok(()));
     }
 
     #[test]

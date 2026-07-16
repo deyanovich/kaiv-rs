@@ -75,6 +75,11 @@ pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
             }
         }
     }
+    if !pending.is_empty() {
+        return Err(PipelineError::Other(
+            "trailing constraint line(s) in .taiv with no &name= definition".into(),
+        ));
+    }
     if library.is_empty() {
         return Err(PipelineError::Other(
             "missing .!kaivtype declaration in .taiv".into(),

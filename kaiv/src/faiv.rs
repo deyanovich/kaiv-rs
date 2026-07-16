@@ -143,6 +143,14 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
                 let name = left.strip_prefix('&').ok_or_else(|| {
                     PipelineError::Other(format!("unexpected .faiv content line: {left}"))
                 })?;
+                // unit-name = 1*ALPHA (or a `~`+3-uppercase currency
+                // code); the lexer's looser bare-name grammar admits
+                // `_`/digits, which unit::parse_expr can never reference.
+                if !valid_unit_name(name) {
+                    return Err(PipelineError::Other(format!(
+                        "invalid unit name in .faiv: &{name} (unit-name is 1*ALPHA)"
+                    )));
+                }
                 let def = if value.is_empty() {
                     let d = pending.take().ok_or_else(|| {
                         PipelineError::Other(format!(
@@ -156,6 +164,13 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
                         alias_of: None,
                     }
                 } else {
+                    // A dimension line pairs only with a bare `&name=`
+                    // definition; above an alias it defines nothing.
+                    if pending.is_some() {
+                        return Err(PipelineError::Other(format!(
+                            "alias &{name}={value} is preceded by a dimension line that defines nothing"
+                        )));
+                    }
                     // Alias: the target must already be defined.
                     let target = units.get(*value).cloned().ok_or_else(|| {
                         PipelineError::Other(format!("alias &{name}={value} has no target"))
@@ -178,6 +193,11 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
             }
         }
     }
+    if pending.is_some() {
+        return Err(PipelineError::Other(
+            "trailing dimension line in .faiv with no &name= definition".into(),
+        ));
+    }
     if library.is_empty() {
         return Err(PipelineError::Other(
             "missing .!kaivunit declaration in .faiv".into(),
@@ -186,26 +206,41 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
     Ok(UnitLib { library, units })
 }
 
+/// unit-name = 1*ALPHA, or a currency `~` + 3 uppercase letters.
+fn valid_unit_name(n: &str) -> bool {
+    match n.strip_prefix('~') {
+        Some(code) => code.len() == 3 && code.bytes().all(|b| b.is_ascii_uppercase()),
+        None => !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphabetic()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_library() {
-        let src = b".!kaivunit 1 astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&astronomical_unit=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
+        let src = b".!kaivunit 1 astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&ua=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
         let lib = parse_faiv(src).unwrap();
         assert_eq!(lib.library, "astro/units");
         let au = &lib.units["au"];
         assert_eq!(au.dimension, "m");
         assert_eq!(au.factor.as_deref(), Some("1.495978707e11"));
-        assert_eq!(
-            lib.units["astronomical_unit"].alias_of.as_deref(),
-            Some("au")
-        );
+        assert_eq!(lib.units["ua"].alias_of.as_deref(), Some("au"));
         let xyz = &lib.units["~XYZ"];
         assert_eq!(xyz.dimension, "$");
         assert!(xyz.factor.is_none());
         assert!(xyz.rate_source.as_deref().unwrap().contains("{timestamp}"));
+    }
+
+    #[test]
+    fn invalid_unit_names_and_orphan_lines_rejected() {
+        // Underscore name is not 1*ALPHA.
+        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1.0\n&light_second=\n").is_err());
+        // Dimension line above an alias defines nothing.
+        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1000\n&km=\nm 1609.344\n&mile=km\n").is_err());
+        // Trailing dimension line with no &name=.
+        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1.0\n").is_err());
     }
 
     #[test]

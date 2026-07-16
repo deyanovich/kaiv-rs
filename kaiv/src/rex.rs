@@ -2,7 +2,24 @@
 //! § Formal Grammar, "Regex dialect"): literals, classes, `.`, anchors,
 //! grouping, alternation, greedy bounded quantifiers, and the escapes
 //! `\d` `\.` `\/` `\\` (any escaped punctuation is a literal).
-//! Backtracking over the AST; no backreferences, no lookaround.
+//!
+//! Matching is an iterative Thompson/Pike NFA simulation over a compiled
+//! instruction list: O(pattern) memory independent of input length, and
+//! linear time in the input. This is the finite-state, constant-memory
+//! execution model the spec pins — it cannot overflow the stack on long
+//! inputs and cannot exhibit catastrophic backtracking (ReDoS). No
+//! backreferences, no lookaround.
+
+// Guards on untrusted pattern bodies (schema/type-library/imported
+// JSON-Schema/XSD patterns): reject pathological input at compile time
+// rather than let it exhaust memory. These bound only degenerate
+// patterns — real schema patterns are orders of magnitude smaller.
+const MAX_PATTERN_LEN: usize = 4096;
+const MAX_PARSE_DEPTH: usize = 128;
+const MAX_REPEAT: u32 = 1024;
+const MAX_PROG: usize = 200_000;
+
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 enum Node {
@@ -10,7 +27,11 @@ enum Node {
     Any,
     Class {
         neg: bool,
-        ranges: Vec<(char, char)>,
+        // Shared, not owned: bounded repetition physically copies the
+        // instruction, and an owned Vec would multiply a fat class's
+        // payload by the repeat count (a ~4 KB hostile pattern could
+        // reach gigabytes). An Arc clone is O(1).
+        ranges: Arc<[(char, char)]>,
     },
     Start,
     End,
@@ -23,34 +44,151 @@ enum Node {
     },
 }
 
+/// One NFA instruction. `Split`/`Jmp` are epsilon transitions;
+/// `Start`/`End` are zero-width assertions.
+#[derive(Debug, Clone)]
+enum Inst {
+    Char(char),
+    Any,
+    Class {
+        neg: bool,
+        ranges: Arc<[(char, char)]>,
+    },
+    Start,
+    End,
+    Split(usize, usize),
+    Jmp(usize),
+    Match,
+}
+
 #[derive(Debug, Clone)]
 pub struct Regex {
-    ast: Node,
+    prog: Vec<Inst>,
 }
 
 impl Regex {
     pub fn new(pattern: &str) -> Option<Regex> {
+        if pattern.len() > MAX_PATTERN_LEN {
+            return None;
+        }
         let cs: Vec<char> = pattern.chars().collect();
         let mut i = 0;
-        let ast = parse_alt(&cs, &mut i)?;
+        let ast = parse_alt(&cs, &mut i, 0)?;
         if i != cs.len() {
             return None; // trailing garbage, e.g. unbalanced ')'
         }
-        Some(Regex { ast })
+        let mut prog = Vec::new();
+        emit(&ast, &mut prog)?;
+        prog.push(Inst::Match);
+        Some(Regex { prog })
     }
 
     /// Unanchored search (patterns anchor themselves with `^`/`$`).
     pub fn is_match(&self, text: &str) -> bool {
         let s: Vec<char> = text.chars().collect();
-        (0..=s.len()).any(|start| m(&self.ast, &s, start, &|_j| true))
+        let prog = &self.prog;
+        let len = s.len();
+        let n = prog.len();
+
+        // Pike NFA simulation: `clist` holds the epsilon-closed set of
+        // consuming/accepting instruction pointers reachable at the
+        // current position. A fresh start thread is seeded at every
+        // position, which implements the unanchored search.
+        let mut seen = vec![0u32; n];
+        let mut gen = 0u32;
+        let mut clist: Vec<usize> = Vec::new();
+        let mut nlist: Vec<usize> = Vec::new();
+        // One scratch stack reused across every epsilon closure: an
+        // allocation per add_thread call would be O(input × program).
+        let mut stack: Vec<usize> = Vec::new();
+
+        gen += 1;
+        add_thread(&mut clist, &mut stack, &mut seen, gen, prog, 0, 0, len);
+
+        // `pos` indexes the input and drives the zero-width assertions,
+        // so an index walk (including the final pos == len) is the right
+        // shape here.
+        #[allow(clippy::needless_range_loop)]
+        for pos in 0..=len {
+            if clist.iter().any(|&pc| matches!(prog[pc], Inst::Match)) {
+                return true;
+            }
+            if pos == len {
+                break;
+            }
+            let c = s[pos];
+            nlist.clear();
+            gen += 1;
+            for &pc in &clist {
+                let hit = match &prog[pc] {
+                    Inst::Char(ch) => *ch == c,
+                    Inst::Any => true,
+                    Inst::Class { neg, ranges } => class_match(*neg, ranges, c),
+                    _ => false,
+                };
+                if hit {
+                    add_thread(&mut nlist, &mut stack, &mut seen, gen, prog, pc + 1, pos + 1, len);
+                }
+            }
+            // Unanchored: a match may also begin at the next position.
+            add_thread(&mut nlist, &mut stack, &mut seen, gen, prog, 0, pos + 1, len);
+            std::mem::swap(&mut clist, &mut nlist);
+        }
+        false
     }
 }
 
-fn parse_alt(cs: &[char], i: &mut usize) -> Option<Node> {
-    let mut branches = vec![parse_seq(cs, i)?];
+/// Follow epsilon transitions from `pc` (iteratively, so a long chain of
+/// `Jmp`/`Split` cannot overflow the native stack), adding every
+/// reachable consuming/accepting instruction to `list`. Zero-width
+/// assertions are resolved against `pos`.
+#[allow(clippy::too_many_arguments)]
+fn add_thread(
+    list: &mut Vec<usize>,
+    stack: &mut Vec<usize>,
+    seen: &mut [u32],
+    gen: u32,
+    prog: &[Inst],
+    pc: usize,
+    pos: usize,
+    len: usize,
+) {
+    stack.clear();
+    stack.push(pc);
+    while let Some(pc) = stack.pop() {
+        if seen[pc] == gen {
+            continue;
+        }
+        seen[pc] = gen;
+        match &prog[pc] {
+            Inst::Jmp(x) => stack.push(*x),
+            Inst::Split(a, b) => {
+                stack.push(*b);
+                stack.push(*a);
+            }
+            Inst::Start => {
+                if pos == 0 {
+                    stack.push(pc + 1);
+                }
+            }
+            Inst::End => {
+                if pos == len {
+                    stack.push(pc + 1);
+                }
+            }
+            _ => list.push(pc),
+        }
+    }
+}
+
+fn parse_alt(cs: &[char], i: &mut usize, depth: usize) -> Option<Node> {
+    if depth > MAX_PARSE_DEPTH {
+        return None;
+    }
+    let mut branches = vec![parse_seq(cs, i, depth)?];
     while cs.get(*i) == Some(&'|') {
         *i += 1;
-        branches.push(parse_seq(cs, i)?);
+        branches.push(parse_seq(cs, i, depth)?);
     }
     Some(if branches.len() == 1 {
         branches.pop().unwrap()
@@ -59,10 +197,10 @@ fn parse_alt(cs: &[char], i: &mut usize) -> Option<Node> {
     })
 }
 
-fn parse_seq(cs: &[char], i: &mut usize) -> Option<Node> {
+fn parse_seq(cs: &[char], i: &mut usize, depth: usize) -> Option<Node> {
     let mut nodes = Vec::new();
     while *i < cs.len() && cs[*i] != '|' && cs[*i] != ')' {
-        let atom = parse_atom(cs, i)?;
+        let atom = parse_atom(cs, i, depth)?;
         nodes.push(parse_postfix(cs, i, atom)?);
     }
     Some(Node::Seq(nodes))
@@ -89,6 +227,13 @@ fn parse_postfix(cs: &[char], i: &mut usize, atom: Node) -> Option<Node> {
                 let n: u32 = body.parse().ok()?;
                 (n, Some(n))
             };
+            // Transposed bounds (`a{3,1}`) are unsatisfiable — reject at
+            // compile time, as mainstream engines do.
+            if let Some(hi) = hi {
+                if lo > hi {
+                    return None;
+                }
+            }
             *i += 1;
             return Some(Node::Rep {
                 node: Box::new(atom),
@@ -106,12 +251,12 @@ fn parse_postfix(cs: &[char], i: &mut usize, atom: Node) -> Option<Node> {
     })
 }
 
-fn parse_atom(cs: &[char], i: &mut usize) -> Option<Node> {
+fn parse_atom(cs: &[char], i: &mut usize, depth: usize) -> Option<Node> {
     let c = *cs.get(*i)?;
     *i += 1;
     match c {
         '(' => {
-            let inner = parse_alt(cs, i)?;
+            let inner = parse_alt(cs, i, depth + 1)?;
             if cs.get(*i) != Some(&')') {
                 return None;
             }
@@ -128,7 +273,7 @@ fn parse_atom(cs: &[char], i: &mut usize) -> Option<Node> {
             match e {
                 'd' => Some(Node::Class {
                     neg: false,
-                    ranges: vec![('0', '9')],
+                    ranges: Arc::from(vec![('0', '9')]),
                 }),
                 // Escaped punctuation is literal. An escaped
                 // alphanumeric is NOT: `\1` is a backreference and
@@ -156,7 +301,10 @@ fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
         let c = *cs.get(*i)?;
         if c == ']' && !first {
             *i += 1;
-            return Some(Node::Class { neg, ranges });
+            return Some(Node::Class {
+                neg,
+                ranges: ranges.into(),
+            });
         }
         first = false;
         let lo = if c == '\\' {
@@ -166,6 +314,13 @@ fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
             if e == 'd' {
                 ranges.push(('0', '9'));
                 continue;
+            }
+            // A shorthand class or backreference (`\w`,`\s`,`\1`) is
+            // outside the dialect even inside a class — reject rather
+            // than silently treat as the literal letter/digit, matching
+            // parse_atom's escape policy.
+            if e.is_ascii_alphanumeric() {
+                return None;
             }
             e
         } else {
@@ -178,6 +333,11 @@ fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
             if hi == '\\' {
                 *i += 1;
                 hi = *cs.get(*i)?;
+                // `\d` and other shorthand escapes cannot be a range
+                // endpoint.
+                if hi.is_ascii_alphanumeric() {
+                    return None;
+                }
             }
             *i += 1;
             ranges.push((lo, hi));
@@ -192,46 +352,105 @@ fn class_match(neg: bool, ranges: &[(char, char)], c: char) -> bool {
     hit != neg
 }
 
-/// Continuation-passing backtracking matcher.
-fn m(node: &Node, s: &[char], i: usize, k: &dyn Fn(usize) -> bool) -> bool {
+/// Compile an AST node into the instruction list (Thompson
+/// construction). Returns None if the program would exceed the size cap
+/// — a bounded reject for a pathological pattern, never for a real one.
+fn emit(node: &Node, prog: &mut Vec<Inst>) -> Option<()> {
+    if prog.len() > MAX_PROG {
+        return None;
+    }
     match node {
-        Node::Char(c) => i < s.len() && s[i] == *c && k(i + 1),
-        Node::Any => i < s.len() && k(i + 1),
-        Node::Class { neg, ranges } => i < s.len() && class_match(*neg, ranges, s[i]) && k(i + 1),
-        Node::Start => i == 0 && k(i),
-        Node::End => i == s.len() && k(i),
-        Node::Seq(v) => m_seq(v, s, i, k),
-        Node::Alt(v) => v.iter().any(|n| m(n, s, i, k)),
-        Node::Rep { node, min, max } => m_rep(node, *min, *max, 0, s, i, k),
+        Node::Char(c) => prog.push(Inst::Char(*c)),
+        Node::Any => prog.push(Inst::Any),
+        Node::Class { neg, ranges } => prog.push(Inst::Class {
+            neg: *neg,
+            ranges: ranges.clone(),
+        }),
+        Node::Start => prog.push(Inst::Start),
+        Node::End => prog.push(Inst::End),
+        Node::Seq(v) => {
+            for n in v {
+                emit(n, prog)?;
+            }
+        }
+        Node::Alt(v) => emit_alt(v, prog)?,
+        Node::Rep { node, min, max } => emit_rep(node, *min, *max, prog)?,
     }
+    Some(())
 }
 
-fn m_seq(v: &[Node], s: &[char], i: usize, k: &dyn Fn(usize) -> bool) -> bool {
-    match v.split_first() {
-        None => k(i),
-        Some((head, tail)) => m(head, s, i, &|j| m_seq(tail, s, j, k)),
+// Iterative on purpose: a flat alternation can carry thousands of
+// branches within MAX_PATTERN_LEN, and per-branch recursion would be
+// the one native-stack recursion not bounded by MAX_PARSE_DEPTH.
+fn emit_alt(branches: &[Node], prog: &mut Vec<Inst>) -> Option<()> {
+    let mut jmps = Vec::new();
+    let last = branches.len() - 1;
+    for (i, b) in branches.iter().enumerate() {
+        if i < last {
+            // split(body, next-branch); body ends with jmp(end).
+            let sp = prog.len();
+            prog.push(Inst::Split(0, 0));
+            emit(b, prog)?;
+            jmps.push(prog.len());
+            prog.push(Inst::Jmp(0));
+            prog[sp] = Inst::Split(sp + 1, prog.len());
+        } else {
+            emit(b, prog)?;
+        }
     }
+    let end = prog.len();
+    for j in jmps {
+        prog[j] = Inst::Jmp(end);
+    }
+    Some(())
 }
 
-fn m_rep(
-    node: &Node,
-    min: u32,
-    max: Option<u32>,
-    done: u32,
-    s: &[char],
-    i: usize,
-    k: &dyn Fn(usize) -> bool,
-) -> bool {
-    // Greedy: try one more repetition first (guarding zero-width loops),
-    // then fall back to the continuation once the minimum is met.
-    if max.is_none_or(|mx| done < mx)
-        && m(node, s, i, &|j| {
-            j > i && m_rep(node, min, max, done + 1, s, j, k)
-        })
-    {
-        return true;
+fn emit_rep(node: &Node, min: u32, max: Option<u32>, prog: &mut Vec<Inst>) -> Option<()> {
+    match max {
+        None => {
+            if min == 0 {
+                // star: L1: split L2,L3 ; L2: <body> ; jmp L1 ; L3:
+                let l1 = prog.len();
+                let sp = prog.len();
+                prog.push(Inst::Split(0, 0));
+                let l2 = prog.len();
+                emit(node, prog)?;
+                prog.push(Inst::Jmp(l1));
+                let l3 = prog.len();
+                prog[sp] = Inst::Split(l2, l3);
+            } else {
+                if min > MAX_REPEAT {
+                    return None;
+                }
+                for _ in 0..min {
+                    emit(node, prog)?;
+                }
+                emit_rep(node, 0, None, prog)?;
+            }
+        }
+        Some(mx) => {
+            if min > mx || mx > MAX_REPEAT {
+                return None;
+            }
+            for _ in 0..min {
+                emit(node, prog)?;
+            }
+            // (mx - min) optional greedy copies, each able to short to a
+            // common end.
+            let mut splits = Vec::new();
+            for _ in 0..(mx - min) {
+                let sp = prog.len();
+                prog.push(Inst::Split(0, 0));
+                splits.push(sp);
+                emit(node, prog)?;
+            }
+            let end = prog.len();
+            for sp in splits {
+                prog[sp] = Inst::Split(sp + 1, end);
+            }
+        }
     }
-    done >= min && k(i)
+    Some(())
 }
 
 #[cfg(test)]
@@ -246,9 +465,79 @@ mod tests {
         for p in [r"^(a)\1$", r"\w+", r"a\s", r"\bword"] {
             assert!(Regex::new(p).is_none(), "{p} must be rejected");
         }
+        // The same holds inside a character class.
+        for p in [r"[\w]+", r"[\s]", r"[a-\d]", r"[0-\d]"] {
+            assert!(Regex::new(p).is_none(), "{p} must be rejected");
+        }
         // Escaped punctuation and \d stay in.
         assert!(Regex::new(r"a\.b\/c\\d").is_some());
         assert!(Regex::new(r"\d{2,4}").is_some());
+        assert!(Regex::new(r"[\d]").is_some());
+        assert!(Regex::new(r"[\.\-]").is_some());
+        assert!(Regex::new(r"[a-z\/]").is_some());
+    }
+
+    #[test]
+    fn transposed_and_pathological_quantifiers_rejected() {
+        assert!(Regex::new("a{3,1}").is_none());
+        assert!(Regex::new(r"^\d{4,2}$").is_none());
+        assert!(Regex::new("a{2,4}").is_some());
+        assert!(Regex::new("a{3}").is_some());
+        assert!(Regex::new("a{2,}").is_some());
+        assert!(Regex::new("a{3,3}").is_some());
+    }
+
+    #[test]
+    fn deeply_nested_or_huge_patterns_reject_without_overflow() {
+        // Parser must not overflow the stack on hostile nesting.
+        assert!(Regex::new(&"(".repeat(100_000)).is_none());
+        // A modest number of groups still parses.
+        assert!(Regex::new(&"(a)".repeat(60)).is_some());
+    }
+
+    #[test]
+    fn fat_class_under_repetition_compiles_cheaply() {
+        // A large class body times a nested bounded repeat: the repeat
+        // physically copies the Class instruction, and the shared-Arc
+        // ranges keep that O(copies), not O(copies × class size) — an
+        // owned payload here measured in the gigabytes.
+        let p = format!("([{}]{{1024}}){{100}}", "a".repeat(1000));
+        assert!(Regex::new(&p).is_some());
+    }
+
+    #[test]
+    fn flat_alternation_with_thousands_of_branches() {
+        // emit_alt must not recurse per branch: a 2000-branch flat
+        // alternation fits MAX_PATTERN_LEN and must compile and match
+        // on any stack size.
+        let p = vec!["a"; 2000].join("|");
+        let re = Regex::new(&p).unwrap();
+        assert!(re.is_match("a"));
+        assert!(!re.is_match("b"));
+    }
+
+    #[test]
+    fn long_inputs_match_without_overflow_or_blowup() {
+        // A long value under `+` must MATCH (no false negative) and must
+        // not overflow the stack — the whole point of the NFA rewrite.
+        assert!(Regex::new("^[0-9]+$").unwrap().is_match(&"9".repeat(500_000)));
+        assert!(Regex::new("^[A-Za-z0-9+/]*={0,2}$")
+            .unwrap()
+            .is_match(&"a".repeat(200)));
+        // A non-matching long value returns false, also without overflow.
+        let mut bad = "9".repeat(500_000);
+        bad.push('a');
+        assert!(!Regex::new("^[0-9]+$").unwrap().is_match(&bad));
+    }
+
+    #[test]
+    fn no_catastrophic_backtracking() {
+        // `^(a+)+$` on a non-matching run pins a backtracker for minutes;
+        // the NFA returns immediately.
+        let re = Regex::new("^(a+)+$").unwrap();
+        let t = format!("{}X", "a".repeat(40));
+        assert!(!re.is_match(&t));
+        assert!(re.is_match("aaaa"));
     }
 
     fn ok(p: &str, t: &str) -> bool {

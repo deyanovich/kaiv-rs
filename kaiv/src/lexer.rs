@@ -40,6 +40,11 @@ pub enum LineKind<'a> {
     /// Rule 6 metadata annotation (`!type`, `?prov`, `&name`, or a
     /// schema/type-library constraint line).
     Meta(&'a str),
+    /// Namespace-variable splat as a standalone line (`$/.name`,
+    /// authored `.kaiv` only) — the variable's pairs expand at this
+    /// point in the open block (SPEC.md § Namespace-Variable Splat).
+    /// Payload is the variable name.
+    VarSplat(&'a str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +58,8 @@ const DECL_KEYWORDS: &[&str] = &[
     "kaivschema",
     "kaivtype",
     "kaivunit",
+    "kaivmap",
+    "kaivmetaschema",
     "schema",
     "types",
     "units",
@@ -60,6 +67,13 @@ const DECL_KEYWORDS: &[&str] = &[
     "provenance",
     "ref",
     "compose",
+    "source",
+    "target",
+    "via",
+    "drop",
+    "bind",
+    "unique",
+    "fk",
 ];
 
 pub fn lex(input: &[u8], kind: FileKind) -> Result<Vec<Line<'_>>, LexErrorAt> {
@@ -135,6 +149,12 @@ fn classify<'a>(
     if s.is_empty() {
         return Ok(LineKind::Blank);
     }
+    // A `#!` on the first line is a shebang, not a comment (SPEC.md
+    // § Shebang Lines: MUST NOT be treated as a comment) — skipped
+    // by the pipeline, classified distinctly from `#` comments.
+    if no == 1 && s.starts_with("#!") {
+        return Ok(LineKind::Blank);
+    }
     if let Some(c) = s.strip_prefix('#') {
         return Ok(LineKind::Comment(c));
     }
@@ -157,6 +177,15 @@ fn classify<'a>(
             // the array path; the Lexer validates its regular grammar
             // (SPEC.md § Level 2, Implementation Impact).
             let toks = crate::table::tokens(inner);
+            // The array-path token must satisfy the array-path grammar
+            // (`["/"] *( step "/" ) "@" name`); a missing `@` or an
+            // out-of-grammar segment is INVALID_KEY.
+            if !toks.first().is_some_and(|p| valid_array_path(p)) {
+                return Err(LexErrorAt {
+                    error: LexError::InvalidKey,
+                    line: no,
+                });
+            }
             if toks.len() > 1 && crate::table::parse_header(&toks[1..]).is_none() {
                 return Err(LexErrorAt {
                     error: LexError::InvalidConstraint,
@@ -168,6 +197,21 @@ fn classify<'a>(
     }
     if let Some(rest) = s.strip_prefix('(') {
         if let Some(inner) = rest.strip_suffix(')') {
+            // The ns-path token must satisfy `"/" step *( "/" step )`;
+            // a missing leading `/` or bad segment is INVALID_KEY. The
+            // only clause the grammar admits after the path is
+            // `schema:` (rejected later by the compilers) — any other
+            // trailing token is off-grammar and must not vanish
+            // silently.
+            let toks = crate::table::tokens(inner);
+            if !toks.first().is_some_and(|p| valid_ns_path(p))
+                || !toks[1..].iter().all(|t| t.starts_with("schema:"))
+            {
+                return Err(LexErrorAt {
+                    error: LexError::InvalidKey,
+                    line: no,
+                });
+            }
             return Ok(LineKind::NsOpen(inner));
         }
     }
@@ -202,6 +246,16 @@ fn classify<'a>(
         check_key(left, no, kind)?;
         return Ok(LineKind::Content { left, value });
     }
+    // Rule 6: a namespace-variable splat line (`$/.name`) in an
+    // authored data file — the whole line is one ns-var-ref
+    // (SPEC.md § Namespace-Variable Splat, var-splat-line).
+    if kind == FileKind::Data {
+        if let Some(name) = s.strip_prefix("$/.") {
+            if valid_bare_name(name) {
+                return Ok(LineKind::VarSplat(name));
+            }
+        }
+    }
     // Rule 6: metadata annotation.
     let first = s.chars().next().unwrap();
     let meta_ok = match kind {
@@ -223,9 +277,25 @@ fn classify<'a>(
             line: no,
         });
     }
-    if matches!(kind, FileKind::Schema | FileKind::TypeLib)
+    // A malformed `!`/`&` annotation is a lexer-detected INVALID_
+    // CONSTRAINT wherever constraints appear, including authored .kaiv
+    // (SPEC.md § 11.1). Valid annotations already returned via
+    // early_meta, so only malformed ones reach here.
+    if matches!(kind, FileKind::Data | FileKind::Schema | FileKind::TypeLib)
         && (first == '!' || first == '&')
         && crate::anno::parse_annotation(s).is_none()
+    {
+        return Err(LexErrorAt {
+            error: LexError::InvalidConstraint,
+            line: no,
+        });
+    }
+    // A bare constraint-line leader (`/`, `{`, `[`, `..`) reaching this
+    // point failed early_meta's constraint parse (a valid one returns
+    // there; a closed `[...]` was taken as a section-open), so it is a
+    // malformed/unterminated constraint.
+    if matches!(kind, FileKind::Schema | FileKind::TypeLib)
+        && (matches!(first, '/' | '{' | '[') || s.starts_with(".."))
     {
         return Err(LexErrorAt {
             error: LexError::InvalidConstraint,
@@ -363,7 +433,7 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
     }
     if matches!(
         word.as_str(),
-        "kaiv" | "kaivschema" | "kaivtype" | "kaivunit"
+        "kaiv" | "kaivschema" | "kaivtype" | "kaivunit" | "kaivmap" | "kaivmetaschema"
     ) {
         let rest = body[word.len()..].trim_start_matches([' ', '\t']);
         let version: &str = rest.split([' ', '\t']).next().unwrap_or("");
@@ -375,6 +445,14 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
         if major != 1 {
             return Err(LexErrorAt {
                 error: LexError::UnsupportedVersion,
+                line: no,
+            });
+        }
+        // `.!kaiv` admits nothing after the version (SPEC.md § 10.3
+        // format-decl); the other keywords carry a mandatory operand.
+        if word == "kaiv" && !rest[version.len()..].trim_matches([' ', '\t']).is_empty() {
+            return Err(LexErrorAt {
+                error: LexError::InvalidVersion,
                 line: no,
             });
         }
@@ -396,7 +474,10 @@ fn check_version(v: &str) -> Option<u64> {
             return None;
         }
     }
-    major.parse().ok()
+    // A well-formed but oversized major is UNSUPPORTED_VERSION, not
+    // INVALID_VERSION: saturate rather than fail so the != 1 branch
+    // reports it (SPEC.md § 11.1).
+    Some(major.parse().unwrap_or(u64::MAX))
 }
 
 /// Validate the left side of a content line (SPEC.md § Lexer Errors,
@@ -405,7 +486,7 @@ fn check_version(v: &str) -> Option<u64> {
 /// segment within the bare-name grammar
 /// (`( ALPHA / "_" ) *( ALPHA / DIGIT / "_" )`). `path-seg` — which
 /// admits `-` and a leading digit — never applies to data names.
-fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
+pub(crate) fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
     let err = || LexErrorAt {
         error: LexError::InvalidKey,
         line: no,
@@ -437,9 +518,17 @@ fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
 
     // On a canonical line the key grammar governs only the namepath
     // after `'`; the metadata prefix is annotation grammar, validated
-    // by the consuming stage.
+    // by the consuming stage. That prefix always begins with `!`
+    // (metadata-prefix = "!" type-ref …), so an unquoted `'` whose
+    // preceding text is not a metadata prefix is an apostrophe in an
+    // authored key (e.g. `it's`) — INVALID_KEY; quote it (`"it's"`).
     let mut key = match tick {
-        Some(t) => &left[t + 1..],
+        Some(t) => {
+            if !left[..t].starts_with('!') {
+                return Err(err());
+            }
+            &left[t + 1..]
+        }
         None => left,
     };
 
@@ -463,12 +552,31 @@ fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
             }
         }
     }
-    key = key
-        .strip_suffix("+:")
-        .or_else(|| key.strip_suffix(':').filter(|k| !k.is_empty()))
-        .or_else(|| key.strip_suffix('+'))
-        .or_else(|| key.strip_suffix(';'))
-        .unwrap_or(key);
+    // Track the array operators: append-line (`+=`), extend-line
+    // (`;=`) and append-struct-line (`+:=`) all take an `array-path`
+    // left side, whose final segment carries the `@` sigil (SPEC.md
+    // § Formal Grammar, `array-path = [ "/" ] *( step "/" ) "@" name`).
+    let mut array_op = false;
+    key = if let Some(k) = key.strip_suffix("+:") {
+        array_op = true;
+        k
+    } else if let Some(k) = key.strip_suffix(':').filter(|k| !k.is_empty()) {
+        // struct-line: `ns-path ":=" …` — the grammar mandates the
+        // leading `/` (unlike array-path, whose `/` is optional), the
+        // same enforcement class as the `@` sigil on array operators.
+        if kind == FileKind::Data && !k.starts_with('/') {
+            return Err(err());
+        }
+        k
+    } else if let Some(k) = key.strip_suffix('+') {
+        array_op = true;
+        k
+    } else if let Some(k) = key.strip_suffix(';') {
+        array_op = true;
+        k
+    } else {
+        key
+    };
 
     // Quote-aware segmentation on `/` and `::`; validate each segment.
     let cs: Vec<char> = key.chars().collect();
@@ -512,6 +620,12 @@ fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
             return Err(err());
         }
     }
+    // `+=` / `;=` / `+:=` require an array target: the final segment
+    // must carry the `@` sigil (hidden array variables `@.name` also
+    // satisfy this — their segment starts with `@`).
+    if array_op && !segs.last().is_some_and(|s| s.starts_with('@')) {
+        return Err(err());
+    }
     // In schema/type-library files a line-leading bare `re` is the
     // reserved pattern-literal introducer; a field so named must be
     // quoted (`"re"=`). `&re` type definitions are unaffected — the
@@ -523,6 +637,66 @@ fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), LexErrorAt> {
         return Err(err());
     }
     Ok(())
+}
+
+/// Split a path on `/` outside quoted names (`""` doubling aware).
+fn split_slash(p: &str) -> Vec<&str> {
+    let b = p.as_bytes();
+    let mut segs = Vec::new();
+    let mut in_quote = false;
+    let mut start = 0;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                if in_quote && b.get(i + 1) == Some(&b'"') {
+                    i += 1;
+                } else {
+                    in_quote = !in_quote;
+                }
+            }
+            b'/' if !in_quote => {
+                segs.push(&p[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    segs.push(&p[start..]);
+    segs
+}
+
+/// `array-path = ["/"] *( step "/" ) "@" name`: an optional leading
+/// `/`, every step a valid segment, and a final `@`-prefixed name.
+fn valid_array_path(p: &str) -> bool {
+    let segs = split_slash(p.strip_prefix('/').unwrap_or(p));
+    let Some((last, rest)) = segs.split_last() else {
+        return false;
+    };
+    last.starts_with('@')
+        && valid_segment(last)
+        && rest.iter().all(|s| !s.is_empty() && valid_segment(s))
+}
+
+/// `ns-path = "/" step *( "/" step )`: a mandatory leading `/` and at
+/// least one valid step.
+fn valid_ns_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix('/') else {
+        return false;
+    };
+    let segs = split_slash(rest);
+    !segs.is_empty() && segs.iter().all(|s| !s.is_empty() && valid_segment(s))
+}
+
+/// The bare-name grammar: `( ALPHA / "_" ) *( ALPHA / DIGIT / "_" )`.
+fn valid_bare_name(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && (b[0].is_ascii_alphabetic() || b[0] == b'_')
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
 /// One namepath segment: optional `@` (array) and/or `.` (hidden)
@@ -541,7 +715,10 @@ fn valid_segment(seg: &str) -> bool {
     }
     let bs = s.as_bytes();
     if bs.iter().all(|b| b.is_ascii_digit()) {
-        return true; // index
+        // An element index has exactly one canonical spelling — no
+        // leading zeros — so `00` can neither alias nor shadow `0`
+        // (SPEC.md § Canonical index spelling).
+        return bs.len() == 1 || bs[0] != b'0';
     }
     (bs[0].is_ascii_alphabetic() || bs[0] == b'_')
         && bs[1..]
@@ -556,6 +733,113 @@ mod tests {
     fn one(kind: FileKind, line: &str) -> Result<(), LexError> {
         let text = format!("{line}\n");
         lex(text.as_bytes(), kind).map(|_| ()).map_err(|e| e.error)
+    }
+
+    #[test]
+    fn leading_zero_index_is_not_canonical() {
+        assert_eq!(
+            one(FileKind::Data, "!str'/@a/00::x=1"),
+            Err(LexError::InvalidKey)
+        );
+        assert!(one(FileKind::Data, "!str'/@a/0::x=1").is_ok());
+        assert!(one(FileKind::Data, "!str'/@a/10::x=1").is_ok());
+    }
+
+    #[test]
+    fn apostrophe_in_authored_key_is_invalid() {
+        assert_eq!(one(FileKind::Data, "it's=1"), Err(LexError::InvalidKey));
+        assert!(one(FileKind::Data, "\"it's\"=1").is_ok());
+        assert!(one(FileKind::Data, "!str'::host=1").is_ok());
+    }
+
+    #[test]
+    fn section_and_ns_open_paths_validated() {
+        assert!(one(FileKind::Data, "[/@servers]").is_ok());
+        assert_eq!(one(FileKind::Data, "[/servers]"), Err(LexError::InvalidKey));
+        assert_eq!(one(FileKind::Data, "[/@bad-name]"), Err(LexError::InvalidKey));
+        assert!(one(FileKind::Data, "(/server)").is_ok());
+        assert!(one(FileKind::Data, "(/server/backup)").is_ok());
+        assert_eq!(one(FileKind::Data, "(server)"), Err(LexError::InvalidKey));
+        // A whitespace-only ns interior must not panic.
+        assert_eq!(one(FileKind::Data, "( )"), Err(LexError::InvalidKey));
+        // Only a `schema:` clause may follow the ns-path; a stray token
+        // must not vanish silently downstream.
+        assert_eq!(one(FileKind::Data, "(/a b)"), Err(LexError::InvalidKey));
+        assert!(one(FileKind::Data, "(/a schema:acme/x)").is_ok());
+        // Quoted segments may contain whitespace.
+        assert!(one(FileKind::Data, "(/\"my ns\")").is_ok());
+        assert!(one(FileKind::Data, "[/@\"my arr\"]").is_ok());
+    }
+
+    #[test]
+    fn all_inventory_keywords_accepted() {
+        for l in [
+            ".!kaivmap 1 acme/m",
+            ".!kaivmetaschema 1 corp/c",
+            ".!source hub/s",
+            ".!target hub/t",
+            ".!via acme/m",
+            ".!drop /a::b",
+            ".!bind:pat sch",
+            ".!unique:pat /a::b",
+            ".!fk:pat /a::b",
+        ] {
+            assert!(one(FileKind::Data, l).is_ok(), "{l}");
+        }
+        assert_eq!(
+            one(FileKind::Data, ".!bogus x"),
+            Err(LexError::InvalidDirective)
+        );
+    }
+
+    #[test]
+    fn malformed_constraints_are_lexer_detected() {
+        assert_eq!(
+            one(FileKind::Data, "!int[1;2]"),
+            Err(LexError::InvalidConstraint)
+        );
+        assert_eq!(
+            one(FileKind::Schema, "{red,green"),
+            Err(LexError::InvalidConstraint)
+        );
+        assert_eq!(
+            one(FileKind::Schema, "[1,2"),
+            Err(LexError::InvalidConstraint)
+        );
+        assert_eq!(
+            one(FileKind::Schema, "/unterminated"),
+            Err(LexError::InvalidConstraint)
+        );
+    }
+
+    #[test]
+    fn version_overflow_and_trailing_junk() {
+        assert_eq!(
+            one(FileKind::Data, ".!kaiv 99999999999999999999"),
+            Err(LexError::UnsupportedVersion)
+        );
+        assert_eq!(
+            one(FileKind::Data, ".!kaiv 1 oops"),
+            Err(LexError::InvalidVersion)
+        );
+        assert!(one(FileKind::Data, ".!kaiv 1").is_ok());
+    }
+
+    #[test]
+    fn canonical_provenance_lines_are_content() {
+        // A canonical machine line with inline provenance —
+        // DaivBuilder's own output shape — must classify as rule-5
+        // content, not as a full-line annotation: the provenance
+        // scan stops at the `'` delimiter.
+        let text = "!int?sensor1@20250115T093000Z#req-42'/readings::temp=100\n";
+        let lines = lex(text.as_bytes(), FileKind::Data).unwrap();
+        assert!(matches!(
+            lines[0].kind,
+            LineKind::Content {
+                left: "!int?sensor1@20250115T093000Z#req-42'/readings::temp",
+                value: "100"
+            }
+        ));
     }
 
     #[test]
@@ -587,7 +871,9 @@ mod tests {
         assert!(one(FileKind::TypeLib, "&re=").is_ok());
         // Data files have no constraint items: no reservation there.
         assert!(one(FileKind::Data, "re=5").is_ok());
-        assert!(one(FileKind::Data, "re:=host=a").is_ok());
+        assert!(one(FileKind::Data, "/re:=host=a").is_ok());
+        // struct-line requires the leading `/` on its ns-path.
+        assert_eq!(one(FileKind::Data, "server:=a=1"), Err(LexError::InvalidKey));
     }
 
     #[test]

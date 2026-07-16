@@ -56,7 +56,28 @@ pub struct LexErrorAt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppError {
     MetadataWithoutTarget,
+    /// A value references an undefined hidden variable or data field,
+    /// or contains a `$` that begins neither a well-formed reference
+    /// nor the `$$` doubling (SPEC.md § Errors).
+    UndefinedReference,
+    /// A container-variable reference appears where its expansion
+    /// cannot be placed: `$/.name` outside the two splat positions,
+    /// or `$@.name` in a scalar position (SPEC.md
+    /// § Namespace-Variable Splat).
+    VariableContext,
+    /// A compound-form value collides with that form's delimiter:
+    /// `|` in a `:=`/`+:=` pair value, `;` in `;=` data, `:` or `;`
+    /// in an inline map entry (SPEC.md § Errors).
+    DelimiterCollision,
     SchemaDuplicateKey,
+    /// A `.!schema` inheritance chain among `.saiv` files revisits a
+    /// schema already in the chain.
+    SchemaInheritanceCycle,
+    /// An optional field whose resolved default is inapplicable and
+    /// whose type does not admit `!null` — the Denormalizer would
+    /// have nothing to materialize for an absent instance (SPEC.md
+    /// § Default Values).
+    SchemaOptionalWithoutDefault,
     SchemaResolution,
     RequiredFieldSchema,
     DuplicateKeySchema,
@@ -74,7 +95,12 @@ impl AppError {
     pub fn name(self) -> &'static str {
         match self {
             AppError::MetadataWithoutTarget => "MetadataWithoutTargetError",
+            AppError::UndefinedReference => "UndefinedReferenceError",
+            AppError::VariableContext => "VariableContextError",
+            AppError::DelimiterCollision => "DelimiterCollisionError",
             AppError::SchemaDuplicateKey => "SchemaDuplicateKeyError",
+            AppError::SchemaInheritanceCycle => "SchemaInheritanceCycleError",
+            AppError::SchemaOptionalWithoutDefault => "SchemaOptionalWithoutDefaultError",
             AppError::SchemaResolution => "SchemaResolutionError",
             AppError::RequiredFieldSchema => "RequiredFieldSchemaError",
             AppError::DuplicateKeySchema => "DuplicateKeySchemaError",

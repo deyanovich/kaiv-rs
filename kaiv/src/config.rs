@@ -16,6 +16,9 @@ pub struct Config {
     pub registries: BTreeMap<String, String>,
     /// Directory containing `kaiv.kaiv` — relative bases resolve here.
     pub base_dir: Option<PathBuf>,
+    /// Network-cache root (`/cache::dir`, relative to `base_dir`).
+    /// None → `KAIV_CACHE_DIR` / XDG default.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -24,6 +27,7 @@ impl Config {
         let raiv = crate::compile(text)?;
         let daiv = crate::denorm::denormalize(&raiv)?;
         let mut registries = BTreeMap::new();
+        let mut cache_dir = None;
         for line in daiv.lines() {
             // Canonical: !str'/registries::name=value
             let Some(tick) = line.find('\'') else {
@@ -35,11 +39,20 @@ impl Config {
             };
             if let Some(name) = np.strip_prefix("/registries::") {
                 registries.insert(unquote(name), v.to_string());
+            } else if np == "/cache::dir" && !v.is_empty() {
+                let mut p = PathBuf::from(v);
+                if p.is_relative() {
+                    if let Some(dir) = &base_dir {
+                        p = dir.join(p);
+                    }
+                }
+                cache_dir = Some(p);
             }
         }
         Ok(Config {
             registries,
             base_dir,
+            cache_dir,
         })
     }
 
