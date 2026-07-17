@@ -1952,12 +1952,12 @@ mod tests {
         wlong(0, &mut rec); // blob: null branch
         let schema_json = std::str::from_utf8(avsc).unwrap();
         let daiv = build(&import(&ocf(schema_json, &[rec])).unwrap());
-        assert_eq!(crate::validate(&daiv, &sc), Ok(()));
+        assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // A bad enum symbol breaks validity (fields are required, so
         // the wire-shaped document is the reference; flip one value).
         let bad = daiv.replace("level=high", "level=nope");
         assert_eq!(
-            crate::validate(&bad, &sc),
+            crate::validate(&bad, &sc).map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }

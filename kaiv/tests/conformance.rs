@@ -154,7 +154,7 @@ fn schema_vectors() {
                 .to_string();
             let got = match kaiv::validate(&daiv, &schema) {
                 Ok(()) => "pass".to_string(),
-                Err(e) => e.name().to_string(),
+                Err(e) => e.error.name().to_string(),
             };
             if got != want {
                 failures.push(format!("{name}/{cname}: got {got}, want {want}"));

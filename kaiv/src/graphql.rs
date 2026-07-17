@@ -768,15 +768,15 @@ mod tests {
         // `!null'…=` lines (the Denormalizer would emit them; the
         // parallel scan is strict lockstep).
         let daiv = ".!kaiv 1\n!str'::name=api\n!int'::port=443\n!null'::ratio=\n!bool'::active=true\n!null'::tier=\n!str'/@tags::0=a\n!str'/@servers/0::host=h\n!null'/@servers/0::port=\n!int'/limits::rps=5\n";
-        assert_eq!(crate::validate(daiv, &sc), Ok(()));
+        assert_eq!(crate::validate(daiv, &sc).map_err(|e| e.error), Ok(()));
         // Non-null fields are required; Int is 32-bit.
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n", &sc),
+            crate::validate(".!kaiv 1\n!str'::name=api\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::RequiredFieldSchema)
         );
         let big = daiv.replace("port=443", "port=4430000000");
         assert_eq!(
-            crate::validate(&big, &sc),
+            crate::validate(&big, &sc).map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }

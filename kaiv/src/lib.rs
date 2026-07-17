@@ -61,7 +61,7 @@ pub use builder::{DaivBuilder, Provenance};
 pub use compiler::{compile, compile_with};
 pub use config::Config;
 pub use denorm::{denormalize, denormalize_with};
-pub use error::{AppError, LexError, LexErrorAt, PipelineError};
+pub use error::{AppError, AppErrorAt, LexError, LexErrorAt, PipelineError};
 pub use lexer::{lex, FileKind};
 pub use resolve::Resolver;
 pub use schema::{check_type_lib, compile_schema, compile_schema_with};

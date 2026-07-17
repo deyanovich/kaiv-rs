@@ -4,7 +4,7 @@
 //! duplicate-detection set.
 
 use crate::anno::{parse_annotation, parse_constraint_items, Constraint, Item};
-use crate::error::{AppError, PipelineError};
+use crate::error::{AppError, AppErrorAt, PipelineError};
 use crate::resolve::Resolver;
 use crate::rex::Regex;
 use crate::table::{Clause, Collection};
@@ -41,6 +41,9 @@ pub struct SchemaField {
     /// The Validator never materializes it; it rides the `.csaiv` for
     /// consumers (SPEC.md § Default Values).
     pub default: String,
+    /// The raw `.csaiv` metadata prefix (everything before `'`),
+    /// verbatim — carried for error context, never re-parsed.
+    pub prefix: String,
 }
 
 pub fn parse_csaiv(text: &str) -> Result<CompiledSchema, PipelineError> {
@@ -106,6 +109,7 @@ pub fn parse_csaiv(text: &str) -> Result<CompiledSchema, PipelineError> {
             namepath: namepath.to_string(),
             optional,
             default: default.to_string(),
+            prefix: citems.to_string(),
         });
     }
     Ok(CompiledSchema {
@@ -284,11 +288,13 @@ struct DataLine {
     provenance: Option<String>,
     namepath: String,
     value: String,
+    /// 1-based source line in the `.daiv` input, for error context.
+    line: usize,
 }
 
 fn parse_daiv(text: &str) -> Result<Vec<DataLine>, PipelineError> {
     let mut out = Vec::new();
-    for raw in text.lines() {
+    for (i, raw) in text.lines().enumerate() {
         let s = raw.trim_start_matches([' ', '\t']);
         if s.is_empty() || s.starts_with('#') || s.starts_with("//") {
             continue;
@@ -296,30 +302,74 @@ fn parse_daiv(text: &str) -> Result<Vec<DataLine>, PipelineError> {
         if s.starts_with(".!") || s.starts_with(".?") {
             continue;
         }
-        let tick = find_tick(s)
-            .ok_or_else(|| PipelineError::Other(format!("canonical line without ': {s}")))?;
+        let line = i + 1;
+        let tick = find_tick(s).ok_or_else(|| {
+            PipelineError::Other(format!("canonical line without ' (line {line}): {s}"))
+        })?;
         let prefix = &s[..tick];
         let rest = &s[tick + 1..];
         // Quote-aware: a quoted name may contain `=`.
-        let eq = first_eq(rest)
-            .ok_or_else(|| PipelineError::Other(format!("canonical line without =: {s}")))?;
-        let a = parse_annotation(prefix)
-            .ok_or_else(|| PipelineError::Other(format!("bad metadata prefix: {prefix}")))?;
+        let eq = first_eq(rest).ok_or_else(|| {
+            PipelineError::Other(format!("canonical line without = (line {line}): {s}"))
+        })?;
+        let a = parse_annotation(prefix).ok_or_else(|| {
+            PipelineError::Other(format!("bad metadata prefix (line {line}): {prefix}"))
+        })?;
         out.push(DataLine {
             type_name: a.type_name,
             unit: a.unit,
             provenance: a.provenance,
             namepath: rest[..eq].to_string(),
             value: rest[eq + 1..].to_string(),
+            line,
         });
     }
     Ok(out)
 }
 
-pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
+/// Attach failure-site context to an [`AppError`].
+fn at(error: AppError, line: usize, context: String) -> AppErrorAt {
+    AppErrorAt {
+        error,
+        line,
+        context,
+    }
+}
+
+/// Context for a per-field check failure: the data line against the
+/// schema line's verbatim constraint prefix. Values are elided past
+/// 40 characters (on a char boundary) — context, not payload.
+fn field_ctx(error: AppError, f: &SchemaField, d: &DataLine) -> AppErrorAt {
+    let mut value: String = d.value.chars().take(40).collect();
+    if value.len() < d.value.len() {
+        value.push('…');
+    }
+    let unit = d.unit.as_deref().map(|u| format!(":{u}")).unwrap_or_default();
+    let verb = match error {
+        AppError::TypeMismatch => "does not satisfy",
+        AppError::CollationUnsupported => "needs a collation unavailable in",
+        _ => "violates",
+    };
+    at(
+        error,
+        d.line,
+        format!(
+            "{}={value} (type !{}{unit}) {verb} {}",
+            d.namepath, d.type_name, f.prefix
+        ),
+    )
+}
+
+pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
     let data = match parse_daiv(daiv) {
         Ok(d) => d,
-        Err(_) => return Err(AppError::ConstraintViolation),
+        Err(e) => {
+            let detail = match e {
+                PipelineError::Other(s) => s,
+                other => other.to_string(),
+            };
+            return Err(at(AppError::ConstraintViolation, 0, detail));
+        }
     };
     // Provenance is a per-line requirement (SPEC.md § Provenance)
     // orthogonal to the field-matching scan, so enforce it up front
@@ -329,7 +379,14 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
     // first.
     if let Some(level) = schema.provenance {
         for d in &data {
-            check_provenance(level, d.provenance.as_deref())?;
+            check_provenance(level, d.provenance.as_deref()).map_err(|e| {
+                let want = match level {
+                    ProvenanceLevel::Required => "requires source and timestamp on every line",
+                    ProvenanceLevel::Source => "requires a source on every line",
+                    ProvenanceLevel::None => "prohibits provenance",
+                };
+                at(e, d.line, format!("{}: schema {want}", d.namepath))
+            })?;
         }
     }
     let defined: HashSet<&str> = schema.fields.iter().map(|f| f.namepath.as_str()).collect();
@@ -340,7 +397,11 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
     while di < data.len() {
         let d = &data[di];
         if defined.contains(d.namepath.as_str()) && !seen.insert(d.namepath.as_str()) {
-            return Err(AppError::DuplicateKeySchema);
+            return Err(at(
+                AppError::DuplicateKeySchema,
+                d.line,
+                format!("second entry for schema field {}", d.namepath),
+            ));
         }
         // An undefined data line — matching no schema line at all —
         // must not consume the schema pointer: relaxed schemas MAY
@@ -349,7 +410,11 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
         // still have to find their schema lines.
         if !schema.fields.iter().any(|f| line_matches(f, &d.namepath)) {
             if schema.strict {
-                return Err(AppError::UndefinedFieldStrictSchema);
+                return Err(at(
+                    AppError::UndefinedFieldStrictSchema,
+                    d.line,
+                    format!("{} is not defined in the strict schema", d.namepath),
+                ));
             }
             di += 1;
             continue;
@@ -361,13 +426,24 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
             // optional marker (SPEC.md § Parallel Scan Validation).
             // Element counts are enforced by Pass-1 cardinality.
             if !is_collection(&schema.fields[si]) {
-                return Err(AppError::RequiredFieldSchema);
+                return Err(at(
+                    AppError::RequiredFieldSchema,
+                    d.line,
+                    format!(
+                        "declared field {} missing (scan reached {})",
+                        schema.fields[si].namepath, d.namepath
+                    ),
+                ));
             }
             si += 1;
         }
         if si == schema.fields.len() {
             if schema.strict {
-                return Err(AppError::UndefinedFieldStrictSchema);
+                return Err(at(
+                    AppError::UndefinedFieldStrictSchema,
+                    d.line,
+                    format!("{} is not defined in the strict schema", d.namepath),
+                ));
             }
             di += 1;
             continue;
@@ -387,7 +463,7 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
             si = gend;
             continue;
         }
-        check_field(f, d)?;
+        check_field(f, d).map_err(|e| field_ctx(e, f, d))?;
         // Map-entry and scalar-array element lines consume a
         // variable-length run: the scan stays on them until the
         // namepath prefix changes (the spec's array-loop rule).
@@ -401,7 +477,14 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
         // anything else is a missing declared field — materialization
         // guarantees presence, so no optional-marker branch.
         if !is_collection(&schema.fields[si]) {
-            return Err(AppError::RequiredFieldSchema);
+            return Err(at(
+                AppError::RequiredFieldSchema,
+                0,
+                format!(
+                    "declared field {} missing at end of document",
+                    schema.fields[si].namepath
+                ),
+            ));
         }
         si += 1;
     }
@@ -411,7 +494,7 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppError> {
 /// Level 2 collection constraints. Cardinality is a Pass 1 concern
 /// (O(1) counters, checked on scan completion) and fires before the
 /// O(N) Pass 2 table-constraint check (SPEC.md § Validation).
-fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppError> {
+fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppErrorAt> {
     let colls: Vec<(&Collection, Vec<HashMap<&str, &str>>)> = colls
         .iter()
         .map(|c| (c, elements(data, &c.array)))
@@ -419,7 +502,17 @@ fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppE
     for (coll, els) in &colls {
         let n = els.len() as u64;
         if coll.header.min.is_some_and(|m| n < m) || coll.header.max.is_some_and(|m| n > m) {
-            return Err(AppError::CardinalityViolation);
+            let bounds = match (coll.header.min, coll.header.max) {
+                (Some(lo), Some(hi)) => format!("min={lo} max={hi}"),
+                (Some(lo), None) => format!("min={lo}"),
+                (None, Some(hi)) => format!("max={hi}"),
+                (None, None) => unreachable!(),
+            };
+            return Err(at(
+                AppError::CardinalityViolation,
+                0,
+                format!("{} has {n} elements, schema requires {bounds}", coll.array),
+            ));
         }
     }
     for (coll, els) in &colls {
@@ -444,7 +537,20 @@ fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppE
                             })
                             .collect();
                         if !seen.insert(key) {
-                            return Err(AppError::UniquenessViolation);
+                            let tuple: Vec<&str> = fields
+                                .iter()
+                                .map(|f| el.get(f.as_str()).copied().unwrap_or(""))
+                                .collect();
+                            return Err(at(
+                                AppError::UniquenessViolation,
+                                0,
+                                format!(
+                                    "{}: duplicate value ({}) for unique key ({})",
+                                    coll.array,
+                                    tuple.join(", "),
+                                    fields.join(", ")
+                                ),
+                            ));
                         }
                     }
                 }
@@ -460,7 +566,14 @@ fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppE
                     for el in els {
                         let v = el.get(field.as_str()).copied().unwrap_or("");
                         if !targets.contains(v) {
-                            return Err(AppError::ReferentialIntegrity);
+                            return Err(at(
+                                AppError::ReferentialIntegrity,
+                                0,
+                                format!(
+                                    "{}: {field}={v} has no match in {target_arr}/*::{target_field}",
+                                    coll.array
+                                ),
+                            ));
                         }
                     }
                 }
@@ -515,14 +628,21 @@ fn validate_ns_array(
     data: &[DataLine],
     mut di: usize,
     strict: bool,
-) -> Result<usize, AppError> {
+) -> Result<usize, AppErrorAt> {
+    let undefined = |d: &DataLine| {
+        at(
+            AppError::UndefinedFieldStrictSchema,
+            d.line,
+            format!("{} is not defined in the strict schema", d.namepath),
+        )
+    };
     let prefix = format!("{arr}/");
     while di < data.len() && data[di].namepath.starts_with(&prefix) {
         let Some((idx, _)) = split_element(&data[di].namepath, &prefix) else {
             // Deeper structure inside an element — not expressible in
             // the compiled subset; undefined under strict.
             if strict {
-                return Err(AppError::UndefinedFieldStrictSchema);
+                return Err(undefined(&data[di]));
             }
             di += 1;
             continue;
@@ -535,7 +655,7 @@ fn validate_ns_array(
             }
             let Some((i2, field)) = split_element(&d.namepath, &prefix) else {
                 if strict {
-                    return Err(AppError::UndefinedFieldStrictSchema);
+                    return Err(undefined(d));
                 }
                 di += 1;
                 continue;
@@ -555,21 +675,32 @@ fn validate_ns_array(
                     // duplicate schema-defined key (SPEC.md § Errors,
                     // DuplicateKeySchemaError), same as the flat-field
                     // duplicate check above.
-                    return Err(AppError::DuplicateKeySchema);
+                    return Err(at(
+                        AppError::DuplicateKeySchema,
+                        d.line,
+                        format!("second entry for schema field {}", d.namepath),
+                    ));
                 }
                 Some(gk) => {
                     // Materialization guarantees every group field a
                     // line per element — a skipped field is missing,
                     // optional or not (strict lockstep).
                     if gk > gj {
-                        return Err(AppError::RequiredFieldSchema);
+                        return Err(at(
+                            AppError::RequiredFieldSchema,
+                            d.line,
+                            format!(
+                                "element {arr}/{idx} missing declared field {} (scan reached {})",
+                                group[gj].namepath, d.namepath
+                            ),
+                        ));
                     }
-                    check_field(&group[gk], d)?;
+                    check_field(&group[gk], d).map_err(|e| field_ctx(e, &group[gk], d))?;
                     gj = gk + 1;
                 }
                 None => {
                     if strict {
-                        return Err(AppError::UndefinedFieldStrictSchema);
+                        return Err(undefined(d));
                     }
                 }
             }
@@ -578,7 +709,14 @@ fn validate_ns_array(
         // Group fields not seen by the element's end are missing —
         // materialization would have emitted them (strict lockstep).
         if gj < group.len() {
-            return Err(AppError::RequiredFieldSchema);
+            return Err(at(
+                AppError::RequiredFieldSchema,
+                0,
+                format!(
+                    "element {arr}/{idx} missing declared field {}",
+                    group[gj].namepath
+                ),
+            ));
         }
     }
     Ok(di)
@@ -882,6 +1020,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn validation_errors_carry_site_context() {
+        let schema =
+            parse_csaiv(".!kaivschema 1 a/x\n!int[1,65535]'/server::port=\n").unwrap();
+        let err = validate(".!kaiv 1\n!int'/server::port=99999\n", &schema).unwrap_err();
+        assert_eq!(err.error, AppError::ConstraintViolation);
+        assert_eq!(err.line, 2);
+        assert_eq!(
+            err.context,
+            "/server::port=99999 (type !int) violates !int[1,65535]"
+        );
+        assert_eq!(
+            err.to_string(),
+            "ConstraintViolationError: /server::port=99999 (type !int) violates \
+             !int[1,65535] (line 2)"
+        );
+
+        // A missing declared field names the field, without a line.
+        let err = validate(".!kaiv 1\n", &schema).unwrap_err();
+        assert_eq!(err.error, AppError::RequiredFieldSchema);
+        assert_eq!(err.line, 0);
+        assert_eq!(
+            err.context,
+            "declared field /server::port missing at end of document"
+        );
+    }
+
+    #[test]
     fn timestamp_provenance_level_is_gone() {
         // The grammar anchors every entry to its source id, so a
         // timestamp-only level cannot exist — `timestamp` was exactly
@@ -900,10 +1065,10 @@ mod tests {
         // though it is not the first line of the run.
         let bad =
             ".!kaiv 1\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str'/@servers/0::port=1\n";
-        assert_eq!(validate(bad, &schema), Err(AppError::ProvenanceSchema));
+        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ProvenanceSchema));
         // Fully-provenanced element validates.
         let ok = ".!kaiv 1\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str?s1@20250101T000000Z'/@servers/0::port=1\n";
-        assert_eq!(validate(ok, &schema), Ok(()));
+        assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
@@ -915,7 +1080,7 @@ mod tests {
         // element key; the out-of-range second value must not slip
         // through unchecked.
         let dup = ".!kaiv 1\n!str'/@servers/0::port=80\n!str'/@servers/0::port=999999\n";
-        assert_eq!(validate(dup, &schema), Err(AppError::DuplicateKeySchema));
+        assert_eq!(validate(dup, &schema).map_err(|e| e.error), Err(AppError::DuplicateKeySchema));
     }
 
     #[test]
@@ -927,9 +1092,9 @@ mod tests {
         // A quoted key literally named `a/b` is a flat map entry, not
         // deeper structure — it matches and its value is checked.
         let ok = ".!kaiv 1\n!str'::host=a\n!str'/settings::\"a/b\"=1\n";
-        assert_eq!(validate(ok, &schema), Ok(()));
+        assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         let bad = ".!kaiv 1\n!str'::host=a\n!str'/settings::\"a/b\"=oops\n";
-        assert_eq!(validate(bad, &schema), Err(AppError::ConstraintViolation));
+        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
     }
 
     /// A resolver whose base lookups all miss on the filesystem —
@@ -1025,7 +1190,7 @@ mod tests {
     fn locale_collation_is_rejected() {
         let s = parse_csaiv(".!kaivschema 1 a/c\n!str ..lex[en]'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=x\n", &s),
+            validate(".!kaiv 1\n!str'::n=x\n", &s).map_err(|e| e.error),
             Err(AppError::CollationUnsupported)
         );
     }
@@ -1038,12 +1203,12 @@ mod tests {
         let s = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex[fr-CA]'::n=\n").unwrap();
         assert!(validate(".!kaiv 1\n!str'::n=étude\n", &s).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=granite\n", &s),
+            validate(".!kaiv 1\n!str'::n=granite\n", &s).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
         let bare = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=étude\n", &bare),
+            validate(".!kaiv 1\n!str'::n=étude\n", &bare).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
     }
@@ -1059,7 +1224,7 @@ mod tests {
         assert!(validate(".!kaiv 1\n!str'::n=resume\n", &s).is_ok());
         let tertiary = parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[en]'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=resume\n", &tertiary),
+            validate(".!kaiv 1\n!str'::n=resume\n", &tertiary).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
     }
@@ -1071,7 +1236,7 @@ mod tests {
         // comparison is attempted (the field carries no constraint).
         let s = parse_csaiv(".!kaivschema 1 a/c\n!str ..lex[123]'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=x\n", &s),
+            validate(".!kaiv 1\n!str'::n=x\n", &s).map_err(|e| e.error),
             Err(AppError::CollationUnsupported)
         );
     }
@@ -1082,12 +1247,12 @@ mod tests {
         let with = parse_csaiv(".!kaivschema 1 a/u\n!float:km'::d=\n").unwrap();
         assert!(validate(".!kaiv 1\n!float:km'::d=5\n", &with).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!float'::d=5\n", &with),
+            validate(".!kaiv 1\n!float'::d=5\n", &with).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
         );
         let without = parse_csaiv(".!kaivschema 1 a/u\n!float'::d=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!float:km'::d=5\n", &without),
+            validate(".!kaiv 1\n!float:km'::d=5\n", &without).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
         );
     }
@@ -1119,15 +1284,15 @@ mod tests {
         // strict-vs-relaxed).
         let schema = parse_csaiv(".!kaivschema 1 acme/m\n!str'::a=\n!str'::b=\n").unwrap();
         let doc = ".!kaiv 1\n!str'::zzz=1\n!str'::a=x\n!str'::mid=2\n!str'::b=y\n!str'::tail=3\n";
-        assert_eq!(validate(doc, &schema), Ok(()));
+        assert_eq!(validate(doc, &schema).map_err(|e| e.error), Ok(()));
         let strict = parse_csaiv(".!kaivschema 1 acme/m strict\n!str'::a=\n!str'::b=\n").unwrap();
         assert_eq!(
-            validate(doc, &strict),
+            validate(doc, &strict).map_err(|e| e.error),
             Err(AppError::UndefinedFieldStrictSchema)
         );
         // Ordering of DEFINED fields is still enforced.
         let ooo = ".!kaiv 1\n!str'::b=y\n!str'::a=x\n";
-        assert_eq!(validate(ooo, &schema), Err(AppError::RequiredFieldSchema));
+        assert_eq!(validate(ooo, &schema).map_err(|e| e.error), Err(AppError::RequiredFieldSchema));
     }
 
     #[test]
@@ -1135,7 +1300,7 @@ mod tests {
         // parse_daiv splits quote-aware: a name may contain `=`.
         let schema = parse_csaiv(".!kaivschema 1 acme/m\n!str'::\"a=b\"=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::\"a=b\"=equals\n", &schema),
+            validate(".!kaiv 1\n!str'::\"a=b\"=equals\n", &schema).map_err(|e| e.error),
             Ok(())
         );
     }
@@ -1161,21 +1326,22 @@ mod tests {
         assert_eq!(validate(&doc(&[("a", "1"), ("a", "2")]), &schema), Ok(()));
         // Compound uniqueness: same (host, port) pair violates.
         assert_eq!(
-            validate(&doc(&[("a", "1"), ("a", "1")]), &schema),
+            validate(&doc(&[("a", "1"), ("a", "1")]), &schema).map_err(|e| e.error),
             Err(AppError::UniquenessViolation)
         );
         // Length-prefixed keys: ("a","bc") vs ("ab","c") do not collide.
         assert_eq!(validate(&doc(&[("a", "bc"), ("ab", "c")]), &schema), Ok(()));
         // Cardinality bounds.
         assert_eq!(
-            validate(".!kaiv 1\n", &schema),
+            validate(".!kaiv 1\n", &schema).map_err(|e| e.error),
             Err(AppError::CardinalityViolation)
         );
         assert_eq!(
             validate(
                 &doc(&[("a", "1"), ("b", "2"), ("c", "3"), ("d", "4")]),
                 &schema
-            ),
+            )
+            .map_err(|e| e.error),
             Err(AppError::CardinalityViolation)
         );
     }
@@ -1197,7 +1363,7 @@ mod tests {
             "!str'/@employees/0::name=ada\n",
             "!str'/@employees/0::department=eng\n",
         );
-        assert_eq!(validate(ok, &schema), Ok(()));
+        assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         let dangling = concat!(
             ".!kaiv 1\n",
             "!str'/@departments/0::name=eng\n",
@@ -1205,11 +1371,11 @@ mod tests {
             "!str'/@employees/0::department=ops\n",
         );
         assert_eq!(
-            validate(dangling, &schema),
+            validate(dangling, &schema).map_err(|e| e.error),
             Err(AppError::ReferentialIntegrity)
         );
         // Empty collections are valid absent an explicit [min=N].
-        assert_eq!(validate(".!kaiv 1\n", &schema), Ok(()));
+        assert_eq!(validate(".!kaiv 1\n", &schema).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
@@ -1219,17 +1385,17 @@ mod tests {
         )
         .unwrap();
         let ok = ".!kaiv 1\n!str'::host=a\n!str'/settings::x=1\n!str'/settings::y=2\n";
-        assert_eq!(validate(ok, &schema), Ok(()));
+        assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         // Zero entries is a valid map.
         let empty = ".!kaiv 1\n!str'::host=a\n";
-        assert_eq!(validate(empty, &schema), Ok(()));
+        assert_eq!(validate(empty, &schema).map_err(|e| e.error), Ok(()));
         // Entry value must satisfy the value-type constraint.
         let bad = ".!kaiv 1\n!str'::host=a\n!str'/settings::x=oops\n";
-        assert_eq!(validate(bad, &schema), Err(AppError::ConstraintViolation));
+        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
         // Strict: a non-entry under an unrelated path is still undefined.
         let undef = ".!kaiv 1\n!str'::host=a\n!str'/other::x=1\n";
         assert_eq!(
-            validate(undef, &schema),
+            validate(undef, &schema).map_err(|e| e.error),
             Err(AppError::UndefinedFieldStrictSchema)
         );
     }

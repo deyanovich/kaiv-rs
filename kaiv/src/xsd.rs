@@ -34,6 +34,27 @@ use crate::error::PipelineError;
 use crate::json::Val;
 use crate::jsonschema::kaiv_key;
 
+
+/// The implicit inclusive bounds of XSD's bounded integer built-ins
+/// (kept in step with `builtin`); (None, None) for everything else.
+fn int_base_bounds(local: &str) -> (Option<&'static str>, Option<&'static str>) {
+    match local {
+        "long" => (Some("-9223372036854775808"), Some("9223372036854775807")),
+        "int" => (Some("-2147483648"), Some("2147483647")),
+        "short" => (Some("-32768"), Some("32767")),
+        "byte" => (Some("-128"), Some("127")),
+        "unsignedLong" => (Some("0"), Some("18446744073709551615")),
+        "unsignedInt" => (Some("0"), Some("4294967295")),
+        "unsignedShort" => (Some("0"), Some("65535")),
+        "unsignedByte" => (Some("0"), Some("255")),
+        "nonNegativeInteger" => (Some("0"), None),
+        "positiveInteger" => (Some("1"), None),
+        "nonPositiveInteger" => (None, Some("0")),
+        "negativeInteger" => (None, Some("-1")),
+        _ => (None, None),
+    }
+}
+
 fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
@@ -79,12 +100,25 @@ pub fn import_schema(
         body: String::new(),
         imports: std::collections::BTreeSet::new(),
     };
-    // The root element's own type provides the document fields.
+    // The root element's own type provides the document fields —
+    // under the root element's namespace, matching the XML data
+    // converter ("the root element is the single top-level
+    // namespace"), so data imported from XML validates against the
+    // schema imported from its XSD without reshaping.
     let Some(shape) = ctx.element_shape(picked)? else {
         return Err(err("the root element has no resolvable type"));
     };
+    let root_field = sch
+        .attr(picked, "name")
+        .ok_or_else(|| err("the root element has no name"))?;
+    let root_path = format!(
+        "/{}",
+        kaiv_key(root_field).map_err(|_| err(format!(
+            "unrepresentable root element name: {root_field:?}"
+        )))?
+    );
     match shape {
-        Shape::Complex(ct) => ctx.complex_fields(ct, "", false, &mut Vec::new())?,
+        Shape::Complex(ct) => ctx.complex_fields(ct, &root_path, false, &mut Vec::new())?,
         Shape::Scalar(_) => return Err(err("the root element is scalar; nothing to convert")),
     }
     let mut out = format!(".!kaivschema 1 {name}\n");
@@ -259,6 +293,8 @@ impl<'a> Ctx<'a> {
     /// A built-in XSD type's annotation (None = not a built-in;
     /// Some(None) = plain string).
     fn builtin(&mut self, local: &str) -> Option<Option<String>> {
+        // Keep the bounded-integer rows in step with
+        // int_base_bounds below.
         let anno = match local {
             "boolean" => Some("!bool".to_string()),
             "integer" => Some("!int".to_string()),
@@ -296,10 +332,14 @@ impl<'a> Ctx<'a> {
                 self.imports.insert("std/enc");
                 Some("&bin".to_string())
             }
+            "anyURI" => {
+                self.imports.insert("std/net");
+                Some("&uri".to_string())
+            }
             // String-shaped built-ins; hexBinary content is hex TEXT,
             // so it stays a string rather than riding &bin.
             "string" | "normalizedString" | "token" | "language" | "Name" | "NCName" | "ID"
-            | "IDREF" | "IDREFS" | "ENTITY" | "NMTOKEN" | "NMTOKENS" | "anyURI" | "QName"
+            | "IDREF" | "IDREFS" | "ENTITY" | "NMTOKEN" | "NMTOKENS" | "QName"
             | "NOTATION" | "duration" | "gYear" | "gYearMonth" | "gMonth" | "gMonthDay"
             | "gDay" | "hexBinary" => None,
             _ => return None,
@@ -322,11 +362,12 @@ impl<'a> Ctx<'a> {
             self.note(&format!("restriction on non-built-in base {base}"));
             return Ok(None);
         };
-        // The core the facets attach to. Facets narrow the base, so
-        // emitting only the facets is sound (a weakening when the
-        // base range is wider than the facet range). Bounded
-        // floats/doubles exclude non-finite values, so the extended
-        // union collapses to plain float under facets.
+        // The core the facets attach to. Facets narrow the base and a
+        // bounded integer base contributes its own implicit range
+        // (xs:positiveInteger is [1,]); explicit facets override the
+        // base bound they tighten — valid XSD facets only narrow.
+        // Bounded floats/doubles exclude non-finite values, so the
+        // extended union collapses to plain float under facets.
         let core = match local {
             "boolean" => "bool",
             "decimal" | "float" | "double" => "float",
@@ -405,6 +446,17 @@ impl<'a> Ctx<'a> {
                 }
             } else {
                 self.note("maxExclusive (inexact for kaiv inclusive ranges)");
+            }
+        }
+        // A bounded integer base keeps its implicit range where no
+        // facet tightens it (xs:positiveInteger stays >= 1).
+        if is_int {
+            let (base_lo, base_hi) = int_base_bounds(local);
+            if lo.is_none() {
+                lo = base_lo.map(str::to_string);
+            }
+            if hi.is_none() {
+                hi = base_hi.map(str::to_string);
             }
         }
         if lo.is_some() || hi.is_some() {
@@ -869,20 +921,20 @@ mod tests {
     fn core_mapping() {
         let saiv = import_schema(XSD.as_bytes(), None, "acme/config").unwrap();
         assert!(saiv.starts_with(".!kaivschema 1 acme/config\n"));
-        assert!(saiv.contains("\"@env\"=\n"));
-        assert!(saiv.contains("name=\n"));
-        assert!(saiv.contains("!int[-2147483648,2147483647]\nport=\n"));
-        assert!(saiv.contains("!null|float|std/num/inf|std/num/nan\nratio?=\n"));
-        assert!(saiv.contains("!null|str{gold,silver}\ntier?=\n"));
-        assert!(saiv.contains("!null|str/[a-z]+/#[,8]\ncode?=\n"));
-        assert!(saiv.contains("!null|std/time/datetime\nwhen?=\n"));
-        assert!(saiv.contains("/@tag;=\n"));
-        assert!(saiv.contains("[/@server min=1 max=10]\n"));
+        assert!(saiv.contains("/config::\"@env\"=\n"));
+        assert!(saiv.contains("/config::name=\n"));
+        assert!(saiv.contains("!int[-2147483648,2147483647]\n/config::port=\n"));
+        assert!(saiv.contains("!null|float|std/num/inf|std/num/nan\n/config::ratio?=\n"));
+        assert!(saiv.contains("!null|str{gold,silver}\n/config::tier?=\n"));
+        assert!(saiv.contains("!null|str/[a-z]+/#[,8]\n/config::code?=\n"));
+        assert!(saiv.contains("!null|std/time/datetime\n/config::when?=\n"));
+        assert!(saiv.contains("/config/@tag;=\n"));
+        assert!(saiv.contains("[/config/@server min=1 max=10]\n"));
         assert!(saiv.contains("!int[-2147483648,2147483647]\n\"@id\"=\n"));
         assert!(saiv.contains("host=\n"));
         assert!(saiv.contains("!null|int[-2147483648,2147483647]\nweight?=\n"));
-        assert!(saiv.contains("!null|int[1,]\n/limits::rps?=\n"));
-        assert!(saiv.contains("/label::\"#text\"?=\n"));
+        assert!(saiv.contains("!null|int[1,]\n/config/limits::rps?=\n"));
+        assert!(saiv.contains("/config/label::\"#text\"?=\n"));
         assert!(saiv.contains("\"@lang\"?=\n"));
         // The schema compiles, and a document imported from XML by
         // the DATA converter has the right shape for it — after the
@@ -894,14 +946,14 @@ mod tests {
         r.preload("acme/config", "csaiv", csaiv.into_bytes());
         // Canonical text is valid `.raiv`; denormalize_with resolves
         // the declared schema and materializes the absent optionals.
-        let raiv = ".!kaiv 1\n.!schema:acme/config\n!str'::\"@env\"=prod\n!str'::name=api\n!int'::port=443\n!str'/@tag::0=a\n!int'/@server/0::\"@id\"=1\n!str'/@server/0::host=h\n!int'/limits::rps=5\n";
+        let raiv = ".!kaiv 1\n.!schema:acme/config\n!str'/config::\"@env\"=prod\n!str'/config::name=api\n!int'/config::port=443\n!str'/config/@tag::0=a\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n!int'/config/limits::rps=5\n";
         let daiv = crate::denorm::denormalize_with(raiv, &r).unwrap();
-        assert!(daiv.contains("!null'::ratio=\n"));
-        assert!(daiv.contains("!null'/@server/0::weight=\n"));
-        assert_eq!(crate::validate(&daiv, &sc), Ok(()));
+        assert!(daiv.contains("!null'/config::ratio=\n"));
+        assert!(daiv.contains("!null'/config/@server/0::weight=\n"));
+        assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // Required attribute and occurs cardinality are enforced.
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n!int'::port=1\n!int'/@server/0::\"@id\"=1\n!str'/@server/0::host=h\n", &sc),
+            crate::validate(".!kaiv 1\n!str'/config::name=api\n!int'/config::port=1\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::RequiredFieldSchema)
         );
         // Fully materialized except the /@server array (min=1):
@@ -909,12 +961,12 @@ mod tests {
         assert_eq!(
             crate::validate(
                 concat!(
-                    ".!kaiv 1\n!str'::\"@env\"=p\n!str'::name=api\n!int'::port=1\n",
-                    "!null'::ratio=\n!null'::tier=\n!null'::code=\n!null'::when=\n",
-                    "!null'/limits::rps=\n!str'/label::\"#text\"=\n!str'/label::\"@lang\"=\n"
+                    ".!kaiv 1\n!str'/config::\"@env\"=p\n!str'/config::name=api\n!int'/config::port=1\n",
+                    "!null'/config::ratio=\n!null'/config::tier=\n!null'/config::code=\n!null'/config::when=\n",
+                    "!null'/config/limits::rps=\n!str'/config/label::\"#text\"=\n!str'/config/label::\"@lang\"=\n"
                 ),
                 &sc
-            ),
+            ).map_err(|e| e.error),
             Err(crate::AppError::CardinalityViolation)
         );
     }
@@ -935,8 +987,8 @@ mod tests {
 </xsd:schema>"#;
         let saiv = import_schema(xsd.as_bytes(), None, "t").unwrap();
         assert!(saiv.contains("// dropped: choice exclusivity"));
-        assert!(saiv.contains("a?=\n"));
-        assert!(saiv.contains("!null|int[-2147483648,2147483647]\nb?=\n"));
+        assert!(saiv.contains("/doc::a?=\n"));
+        assert!(saiv.contains("!null|int[-2147483648,2147483647]\n/doc::b?=\n"));
         crate::compile_schema(saiv.as_bytes()).unwrap();
         // hexBinary errors at the type site, dropped attribute-side?
         // No: attribute typing errors propagate.

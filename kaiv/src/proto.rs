@@ -1645,14 +1645,14 @@ mod tests {
             .replacen(".!kaiv 1\n", ".!kaiv 1\n.!schema:acme/config\n", 1);
         let raiv = crate::compile(authored.as_bytes()).unwrap();
         let daiv = crate::denorm::denormalize_with(&raiv, &r).unwrap();
-        assert_eq!(crate::validate(&daiv, &sc), Ok(()));
+        assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // The wire ranges are enforced (host materialized so the
         // strict-lockstep scan reaches the port constraint).
         assert_eq!(
             crate::validate(
                 ".!kaiv 1\n!str'::host=\n!int'::port=99999999999\n",
                 &sc
-            ),
+            ).map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }

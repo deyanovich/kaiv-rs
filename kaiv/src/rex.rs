@@ -275,7 +275,13 @@ fn parse_atom(cs: &[char], i: &mut usize, depth: usize) -> Option<Node> {
                     neg: false,
                     ranges: Arc::from(vec![('0', '9')]),
                 }),
-                // Escaped punctuation is literal. An escaped
+                // `\xHH` — exactly two hex digits naming an ASCII
+                // character. The only letter escape besides `\d`:
+                // unambiguous in every source dialect, and the way a
+                // pattern carries the bytes the line grammar cannot
+                // (the `'` delimiter is `\x27`).
+                'x' => hex_escape(cs, i).map(Node::Char),
+                // Escaped punctuation is literal. Any other escaped
                 // alphanumeric is NOT: `\1` is a backreference and
                 // `\w`/`\s`/`\b` are outside the pinned dialect --
                 // treating them as literals would silently change the
@@ -288,6 +294,20 @@ fn parse_atom(cs: &[char], i: &mut usize, depth: usize) -> Option<Node> {
         '*' | '+' | '?' | '{' | ')' => None, // dangling metachar
         _ => Some(Node::Char(c)),
     }
+}
+
+/// `\xHH` after the `\x` has been consumed: exactly two hex digits
+/// naming an ASCII character (00-7F). A missing or non-hex digit, or
+/// a value past 7F, is outside the dialect. Consumes both digits.
+fn hex_escape(cs: &[char], i: &mut usize) -> Option<char> {
+    let h = cs.get(*i)?.to_digit(16)?;
+    let l = cs.get(*i + 1)?.to_digit(16)?;
+    let v = h * 16 + l;
+    if v > 0x7F {
+        return None;
+    }
+    *i += 2;
+    char::from_u32(v)
 }
 
 fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
@@ -315,14 +335,17 @@ fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
                 ranges.push(('0', '9'));
                 continue;
             }
-            // A shorthand class or backreference (`\w`,`\s`,`\1`) is
-            // outside the dialect even inside a class — reject rather
-            // than silently treat as the literal letter/digit, matching
-            // parse_atom's escape policy.
-            if e.is_ascii_alphanumeric() {
+            if e == 'x' {
+                hex_escape(cs, i)?
+            } else if e.is_ascii_alphanumeric() {
+                // A shorthand class or backreference (`\w`,`\s`,`\1`)
+                // is outside the dialect even inside a class — reject
+                // rather than silently treat as the literal
+                // letter/digit, matching parse_atom's escape policy.
                 return None;
+            } else {
+                e
             }
-            e
         } else {
             *i += 1;
             c
@@ -332,7 +355,14 @@ fn parse_class(cs: &[char], i: &mut usize) -> Option<Node> {
             let mut hi = *cs.get(*i)?;
             if hi == '\\' {
                 *i += 1;
-                hi = *cs.get(*i)?;
+                let e = *cs.get(*i)?;
+                if e == 'x' {
+                    *i += 1;
+                    let h = hex_escape(cs, i)?;
+                    ranges.push((lo, h));
+                    continue;
+                }
+                hi = e;
                 // `\d` and other shorthand escapes cannot be a range
                 // endpoint.
                 if hi.is_ascii_alphanumeric() {
@@ -456,6 +486,25 @@ fn emit_rep(node: &Node, min: u32, max: Option<u32>, prog: &mut Vec<Inst>) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_escape_names_ascii_characters() {
+        // \xHH is a literal ASCII character — the way a pattern
+        // carries the line grammar's forbidden bytes (`'` = \x27).
+        let re = Regex::new(r"^[a-z\x27]+$").unwrap();
+        assert!(re.is_match("o'brien"));
+        assert!(!re.is_match("o!brien"));
+        let re = Regex::new(r"^\x41\x2fb$").unwrap(); // A, /, case-insensitive hex
+        assert!(re.is_match("A/b"));
+        // As a class range endpoint, both sides.
+        let re = Regex::new(r"^[\x20-\x7e]+$").unwrap();
+        assert!(re.is_match(" ~ printable"));
+        assert!(!re.is_match("caf\u{e9}"));
+        // Truncated, non-hex, or beyond ASCII: outside the dialect.
+        for p in [r"\x", r"\x2", r"\xzz", r"\x80", r"[\x80]", r"[a\x]", r"^[\x20-\xff]$"] {
+            assert!(Regex::new(p).is_none(), "{p} must be rejected");
+        }
+    }
 
     #[test]
     fn escaped_alphanumerics_are_outside_the_dialect() {

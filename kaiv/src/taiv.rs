@@ -127,11 +127,33 @@ pub fn std_num() -> &'static TypeLib {
     })
 }
 
+/// The embedded `std/net` library — network identifiers: `uri` and
+/// `url` (RFC 3986, the latter with a required authority), `email`
+/// (the WHATWG interchange subset), `hostname` (RFC 1123), `port`.
+pub fn std_net() -> &'static TypeLib {
+    static NET: OnceLock<TypeLib> = OnceLock::new();
+    NET.get_or_init(|| {
+        parse_taiv(include_bytes!("std_net.taiv")).expect("embedded std/net.taiv is valid")
+    })
+}
+
+/// The embedded `std/math` library — `complex` (a+bi, float-grammar
+/// components, deliberately no numeric span: the complex numbers
+/// admit no total order compatible with their arithmetic).
+pub fn std_math() -> &'static TypeLib {
+    static MATH: OnceLock<TypeLib> = OnceLock::new();
+    MATH.get_or_init(|| {
+        parse_taiv(include_bytes!("std_math.taiv")).expect("embedded std/math.taiv is valid")
+    })
+}
+
 /// Embedded libraries, resolvable without any registry lookup.
 pub fn embedded(lib: &str) -> Option<&'static TypeLib> {
     match lib {
         "std/core" => Some(std_core()),
         "std/enc" => Some(std_enc()),
+        "std/math" => Some(std_math()),
+        "std/net" => Some(std_net()),
         "std/num" => Some(std_num()),
         "std/time" => Some(std_time()),
         _ => None,
@@ -174,5 +196,91 @@ mod tests {
             Item::Constraint(Constraint::Pattern(p)) if p == "^[A-Za-z0-9_-]*$"
         ));
         assert_eq!(b64.default, ""); // core types carry the inert default
+    }
+}
+
+#[cfg(test)]
+mod net_math_tests {
+    fn accepts(lib: &str, ty: &str, value: &str) -> bool {
+        let saiv = format!(".!kaivschema 1 t/x\n.!types {lib}\n\n&{ty}\nv=\n");
+        let csaiv = crate::compile_schema(saiv.as_bytes()).unwrap();
+        let sc = crate::parse_csaiv(&csaiv).unwrap();
+        let daiv = format!(".!kaiv 1\n!str'::v={value}\n");
+        crate::validate(&daiv, &sc).is_ok()
+    }
+
+    #[test]
+    fn uri_and_url_follow_rfc_3986() {
+        for v in [
+            "https://kaiv.io/kaiv/spec/latest",
+            "http://user:pw@example.com:8080/a/b?q=1&r=2#frag",
+            "https://[2001:db8::1]:443/x",
+            "https://[v1.fe]/x",
+            "http://192.168.0.1/",
+            "ftp://ftp.is.co.za/rfc/rfc1808.txt",
+            "https://en.wikipedia.org/wiki/It\x27s_a_path",
+            "https://ex.com/%C3%A9",
+        ] {
+            assert!(accepts("std/net", "uri", v), "uri must accept {v}");
+            assert!(accepts("std/net", "url", v), "url must accept {v}");
+        }
+        // Authority-less URIs: uri yes, url no.
+        for v in ["mailto:ada@example.com", "urn:isbn:0451450523", "tel:+1-816-555-1212"] {
+            assert!(accepts("std/net", "uri", v), "uri must accept {v}");
+            assert!(!accepts("std/net", "url", v), "url must reject {v}");
+        }
+        for v in ["", "no scheme", "1http://x/", "http://ex%2/", "http://ex.com/ space"] {
+            assert!(!accepts("std/net", "uri", v), "uri must reject {v}");
+        }
+    }
+
+    #[test]
+    fn email_is_the_whatwg_subset() {
+        for v in [
+            "ada@example.com",
+            "o\x27brien@example.ie",
+            "a.b+tag@sub.example-host.co",
+            "x!#$%&*@d.e",
+        ] {
+            assert!(accepts("std/net", "email", v), "email must accept {v}");
+        }
+        for v in ["ada@", "@example.com", "a@-bad.com", "a@bad-.com", "a b@c.d", "ada"] {
+            assert!(!accepts("std/net", "email", v), "email must reject {v}");
+        }
+    }
+
+    #[test]
+    fn hostname_is_rfc_1123() {
+        for v in ["example.com", "a", "sub-1.ex-ample.org", "xn--nxasmq6b.example"] {
+            assert!(accepts("std/net", "hostname", v), "hostname must accept {v}");
+        }
+        for v in ["-bad.com", "bad-.com", "ex..com", "", "a_b.com"] {
+            assert!(!accepts("std/net", "hostname", v), "hostname must reject {v}");
+        }
+        // 63-octet label passes; 64 fails.
+        assert!(accepts("std/net", "hostname", &"a".repeat(63)));
+        assert!(!accepts("std/net", "hostname", &"a".repeat(64)));
+    }
+
+    #[test]
+    fn port_is_bounded() {
+        for v in ["0", "80", "65535"] {
+            assert!(accepts("std/net", "port", v), "port must accept {v}");
+        }
+        for v in ["65536", "-1", "http", ""] {
+            assert!(!accepts("std/net", "port", v), "port must reject {v}");
+        }
+    }
+
+    #[test]
+    fn complex_is_a_plus_bi() {
+        for v in ["3+2i", "0+0i", "-1.5-0.5i", "3+0i", "0-1e3i", "1e-2+2.5e10i", "3.14+2i"] {
+            assert!(accepts("std/math", "complex", v), "complex must accept {v}");
+        }
+        // One spelling: no bare reals, no lone i, no spaces, no
+        // double sign, i suffix mandatory.
+        for v in ["3", "2i", "i", "3 + 2i", "3+-2i", "3+2j", "3+2", "+2i", "3i+2"] {
+            assert!(!accepts("std/math", "complex", v), "complex must reject {v}");
+        }
     }
 }

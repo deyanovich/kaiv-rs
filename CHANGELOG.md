@@ -7,6 +7,77 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.4.0] - 2026-07-17
+--------------------
+
+### Added
+
+- **The `std/net` library** — network identifiers, embedded like
+  the other std libraries and pinned to their defining documents:
+  `uri` (RFC 3986 generic syntax, exactly — full IPv6/IPvFuture
+  IP-literals, percent-encoding, every path form), `url` (the
+  same grammar with a required authority: the everyday
+  `scheme://` subset; `mailto:`/`urn:` forms are uri-only),
+  `email` (the WHATWG HTML valid-e-mail-address pattern — the
+  practical interchange subset, not full RFC 5322), `hostname`
+  (RFC 1123, the 253-octet total carried as a length constraint),
+  and `port` (`int[0,65535]`).
+- **The `std/math` library** — `complex`: one-spelling `a±bi`
+  with both components always present, the separator sign
+  carrying the imaginary sign, the `i` suffix mandatory, and
+  float-grammar components (Gaussian integers expressible).
+  Deliberately no numeric span: the complex numbers admit no
+  total order compatible with their arithmetic, so ordering
+  stays deterministic byte order and ranges are inert.
+- **The `\xHH` regex escape** (spec addition): exactly two hex
+  digits naming an ASCII character (00-7F), valid as an atom and
+  as a character-class member or range endpoint. The one letter
+  escape beyond `\d` — unambiguous in every source dialect — and
+  the only way a pattern matches the `'` delimiter its body
+  cannot contain literally (RFC 3986 sub-delims, the e-mail
+  local-part alphabet).
+- `kaiv version` (also `--version`/`-V`).
+
+### Changed
+
+- **Validation errors carry the failure site.** `validate`
+  returns `AppErrorAt` — the pinned spec error name plus the
+  1-based `.daiv` line and a context string naming the field,
+  value, and schema constraint involved
+  (`ConstraintViolationError: /server::port=99999 (type !int)
+  violates !int[1,65535] (line 2)`). Duplicates name the field;
+  missing fields name the declared field and where the scan
+  stopped; uniqueness names the colliding tuple and key;
+  referential integrity names the unmatched value and target;
+  cardinality names counts and bounds. The bare names are
+  unchanged — conformance still compares them.
+- **XSD import roots fields under the element's namespace**,
+  matching the XML data converter, so data imported from XML
+  validates against the schema imported from its own XSD without
+  reshaping. (Converted-schema namepaths gain the root segment —
+  regenerate any stored conversions.)
+- Schema converters preserve more instead of dropping: JSON
+  Schema `format: uri`/`email`/`hostname` and XSD `xs:anyURI`
+  land as the `std/net` named types (joining the existing
+  date-time family); a bare `enum`/`const` with no `type`
+  keyword infers its scalar kind from homogeneous members; a
+  restriction on a bounded XSD integer base keeps the base's
+  implicit range (`xs:positiveInteger` + `maxInclusive 9999` is
+  `[1,9999]`, not `[,9999]`).
+
+### Fixed
+
+- **The schema compiler enforces the pattern dialect.** An
+  out-of-dialect pattern (`\w+`, `[\x80]`) was compiled into the
+  `.csaiv` unchecked and surfaced at validate time as a data-side
+  `ConstraintViolationError`; every compiled field's patterns —
+  union alternatives included — now pass through the regex engine
+  at schema compile, and a bad pattern is the schema author's
+  `INVALID_CONSTRAINT_ERROR`, as the spec always said.
+- `kaiv` with no arguments printed a panic instead of the usage
+  text (empty-args slice).
+
+
 [0.3.0] - 2026-07-16
 --------------------
 

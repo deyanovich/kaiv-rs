@@ -80,6 +80,7 @@ COMMANDS:
                                       message/type/element when the
                                       schema declares several
     help                              this text
+    version                           print the version
 
 Output goes to stdout; diagnostics to stderr. Exit 0 on success/pass,
 1 on any error or validation failure.
@@ -139,7 +140,7 @@ fn run(args: &[String]) -> Result<Vec<u8>, String> {
 
 fn run_text(args: &[String]) -> Result<String, String> {
     let cmd = args.first().map(String::as_str).unwrap_or("help");
-    match (cmd, &args[1..]) {
+    match (cmd, args.get(1..).unwrap_or(&[])) {
         ("compile", rest) if rest.len() <= 1 => {
             let r = resolver()?;
             let data = read_input(rest.first().map(String::as_str))?;
@@ -177,7 +178,7 @@ fn run_text(args: &[String]) -> Result<String, String> {
             let daiv = canonical_input(Some(data), None, None)?;
             match kaiv::validate(&daiv, &compiled) {
                 Ok(()) => Ok("pass\n".into()),
-                Err(e) => Err(e.name().to_string()),
+                Err(e) => Err(e.to_string()),
             }
         }
         ("validate", [data]) => {
@@ -192,7 +193,7 @@ fn run_text(args: &[String]) -> Result<String, String> {
                 .ok_or("document declares no .!schema; pass a schema file")?;
             match kaiv::validate(&daiv, &compiled) {
                 Ok(()) => Ok("pass\n".into()),
-                Err(e) => Err(e.name().to_string()),
+                Err(e) => Err(e.to_string()),
             }
         }
         ("infer", rest) => {
@@ -337,6 +338,9 @@ fn run_text(args: &[String]) -> Result<String, String> {
             }
         }
         ("help" | "--help" | "-h", _) => Ok(format!("{USAGE}\n")),
+        ("version" | "--version" | "-V", _) => {
+            Ok(format!("kaiv {}\n", env!("CARGO_PKG_VERSION")))
+        }
         // Known commands with the wrong argument count get a specific
         // message rather than "unknown command".
         (cmd @ ("compile" | "denorm" | "build" | "schema"), _) => Err(format!(

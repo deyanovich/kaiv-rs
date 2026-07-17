@@ -11,6 +11,24 @@ use crate::resolve::{resolve_named, Resolver};
 use crate::taiv::std_core;
 use std::collections::{HashMap, HashSet};
 
+/// Do all `/regex/` bodies in a field's compiled items compile under
+/// the pinned dialect? Union alternatives' groups included.
+fn patterns_in_dialect(items: &[Item]) -> bool {
+    fn group_ok(cs: &[Constraint]) -> bool {
+        cs.iter().all(|c| match c {
+            Constraint::Pattern(b) => crate::rex::Regex::new(b).is_some(),
+            _ => true,
+        })
+    }
+    items.iter().all(|it| match it {
+        Item::Constraint(Constraint::Pattern(b)) => crate::rex::Regex::new(b).is_some(),
+        Item::Constraint(_) | Item::Named(_) => true,
+        Item::Anno(a) => {
+            group_ok(&a.constraints) && a.union.iter().all(|alt| group_ok(&alt.constraints))
+        }
+    })
+}
+
 /// Compile with the core-only resolver (embedded `std/core`, no
 /// registry configuration).
 pub fn compile_schema(input: &[u8]) -> Result<String, PipelineError> {
@@ -340,6 +358,17 @@ fn compile_schema_chain(
                 let joined = items.join(" ");
                 let parsed = parse_constraint_items(&joined)
                     .ok_or_else(|| PipelineError::Other(format!("bad lowered items: {joined}")))?;
+                // Every pattern must sit inside the pinned regex
+                // dialect (SPEC.md § Regex dialect) — enforced here so
+                // a bad pattern is the schema author's
+                // INVALID_CONSTRAINT_ERROR at compile time, not a data
+                // consumer's mystery ConstraintViolation at validate.
+                if !patterns_in_dialect(&parsed) {
+                    return Err(PipelineError::Lex(crate::error::LexErrorAt {
+                        error: crate::error::LexError::InvalidConstraint,
+                        line: 0,
+                    }));
+                }
                 let resolved = std::iter::once(*value)
                     .chain(type_defaults.iter().map(String::as_str))
                     .chain(std::iter::once(""))

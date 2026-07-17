@@ -386,8 +386,16 @@ impl<'a> Ctx<'a> {
                 Ok(())
             }
             [] => {
-                // No type at all: any value — omitting the field keeps
-                // the schema sound (relaxed schemas accept it).
+                // No `type` keyword — but a bare `enum`/`const` still
+                // pins the value set (JSON Schema requires no type
+                // alongside them). When every member is one scalar
+                // kind, that kind IS the type; only a truly untyped
+                // property drops.
+                if let Some(t) = untyped_enum_type(so) {
+                    self.scalar_annotation(so, t, required)?;
+                    self.emit_kv(path, &key, required, so);
+                    return Ok(());
+                }
                 self.note(&format!("untyped property at {}", disp2(path, prop)));
                 Ok(())
             }
@@ -415,17 +423,21 @@ impl<'a> Ctx<'a> {
         if t == "string" {
             if let Some(Val::Str(f)) = get(so, "format") {
                 let mapped = match f.as_str() {
-                    "date-time" => Some("datetime"),
-                    "date" => Some("date"),
-                    "time" => Some("time"),
+                    "date-time" => Some(("std/time", "datetime")),
+                    "date" => Some(("std/time", "date")),
+                    "time" => Some(("std/time", "time")),
+                    "uri" => Some(("std/net", "uri")),
+                    "uri-reference" => None, // relative refs: no kaiv type
+                    "email" => Some(("std/net", "email")),
+                    "hostname" => Some(("std/net", "hostname")),
                     _ => None,
                 };
-                if let Some(name) = mapped {
+                if let Some((lib, name)) = mapped {
                     if required {
-                        self.imports.insert("std/time");
+                        self.imports.insert(lib);
                         self.body.push_str(&format!("&{name}\n"));
                     } else {
-                        self.body.push_str(&format!("!null|std/time/{name}\n"));
+                        self.body.push_str(&format!("!null|{lib}/{name}\n"));
                     }
                     return Ok(());
                 }
@@ -630,6 +642,36 @@ fn type_list(so: &[(String, Val)]) -> Vec<&str> {
     }
 }
 
+/// The uniform scalar JSON type of a bare `enum`/`const` (no `type`
+/// keyword), when one exists: all strings → "string", all booleans →
+/// "boolean", all integer-shaped numbers → "integer", any other
+/// number mix → "number". Mixed kinds — legal JSON Schema — stay
+/// untyped (the caller drops the property with a note).
+fn untyped_enum_type(so: &[(String, Val)]) -> Option<&'static str> {
+    let members: Vec<&Val> = match (get(so, "enum"), get(so, "const")) {
+        (Some(Val::Arr(vs)), _) if !vs.is_empty() => vs.iter().collect(),
+        (None, Some(c)) => vec![c],
+        _ => return None,
+    };
+    let mut kind: Option<&'static str> = None;
+    for m in members {
+        let k = match m {
+            Val::Str(_) => "string",
+            Val::Bool(_) => "boolean",
+            Val::Num(n) if !n.contains(['.', 'e', 'E']) => "integer",
+            Val::Num(_) => "number",
+            _ => return None,
+        };
+        kind = Some(match (kind, k) {
+            (None, k) => k,
+            (Some(p), k) if p == k => p,
+            (Some("integer"), "number") | (Some("number"), "integer") => "number",
+            _ => return None,
+        });
+    }
+    kind
+}
+
 /// A safely spellable enum member (em-char excludes , } ' and space).
 fn enum_member(v: &Val) -> Option<String> {
     let s = match v {
@@ -817,14 +859,14 @@ mod tests {
         let daiv = crate::denorm::denormalize_with(authored, &r).unwrap();
         assert!(daiv.contains("!null'::ratio=\n"));
         assert!(daiv.contains("!null'/@servers/0::port=\n"));
-        assert_eq!(crate::validate(&daiv, &sc), Ok(()));
+        assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // Required enforced; constraint enforced.
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n", &sc),
+            crate::validate(".!kaiv 1\n!str'::name=api\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::RequiredFieldSchema)
         );
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n!int'::port=99999\n", &sc),
+            crate::validate(".!kaiv 1\n!str'::name=api\n!int'::port=99999\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }
@@ -857,7 +899,7 @@ mod tests {
             crate::validate(
                 ".!kaiv 1\n!str'::pre=a/b\n!str'::backref=\n!str'::shorthand=\n!str'::re=x\n",
                 &sc
-            ),
+            ).map_err(|e| e.error),
             Ok(())
         );
     }
@@ -882,11 +924,11 @@ mod tests {
         assert!(saiv.contains("// dropped: minItems at root/tags"));
         let sc = compiles(&saiv);
         assert_eq!(
-            crate::validate(".!kaiv 1\n", &sc),
+            crate::validate(".!kaiv 1\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::CardinalityViolation)
         );
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'/@servers/0::host=h\n", &sc),
+            crate::validate(".!kaiv 1\n!str'/@servers/0::host=h\n", &sc).map_err(|e| e.error),
             Ok(())
         );
     }
@@ -918,7 +960,7 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("// dropped: multipleOf"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!kaiv 1\n!int'::n=7\n", &sc), Ok(()));
+        assert_eq!(crate::validate(".!kaiv 1\n!int'::n=7\n", &sc).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
@@ -930,6 +972,31 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("/^\\/[a-z\\/]+$/\npath?=\n"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!kaiv 1\n!str'::path=/a/b\n", &sc), Ok(()));
+        assert_eq!(crate::validate(".!kaiv 1\n!str'::path=/a/b\n", &sc).map_err(|e| e.error), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod untyped_enum_tests {
+    #[test]
+    fn bare_enum_infers_its_scalar_type() {
+        // enum without `type` is legal JSON Schema; the members pin
+        // the kaiv type instead of dropping the property.
+        let js = r#"{"type":"object","properties":{
+            "proto": {"enum": ["http", "https"]},
+            "level": {"enum": [1, 2, 3]},
+            "ratio": {"enum": [0.5, 1]},
+            "flag":  {"const": true},
+            "mixed": {"enum": ["a", 1]}
+        },"required":["proto"]}"#;
+        let out = crate::jsonschema::import(js.as_bytes(), "acme/x").unwrap();
+        assert!(out.contains("!str{http,https}\nproto=\n"), "{out}");
+        // Optional fields take the null alternative the converter
+        // gives every optional scalar (materialization policy).
+        assert!(out.contains("!null|int{1,2,3}\nlevel?=\n"), "{out}");
+        assert!(out.contains("!null|float{0.5,1}\nratio?=\n"), "{out}");
+        assert!(out.contains("!null|bool{true}\nflag?=\n"), "{out}");
+        // A genuinely mixed enum still drops with the note.
+        assert!(out.contains("// dropped: untyped property at root/mixed"), "{out}");
     }
 }

@@ -1,0 +1,12 @@
+.!kaivtype 1 std/math
+
+// Complex number — a+bi with both components always present, the
+// separator sign carrying the imaginary part's sign, no spaces,
+// the i suffix. Components use the float token grammar (integer
+// spellings included, so Gaussian integers are expressible).
+// Deliberately NO numeric span: the complex numbers admit no total
+// order compatible with their arithmetic, so ordering stays the
+// default byte order — deterministic for uniqueness, meaningless
+// for ranges, which is exactly the mathematical situation.
+/^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?[+-][0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?i$/
+&complex=

@@ -122,6 +122,44 @@ impl fmt::Display for AppError {
     }
 }
 
+/// An application error with the context the Validator attaches at
+/// the failure site. The bare [`AppError`] name stays the pinned
+/// spec string (conformance compares it); `line` and `context` are
+/// presentation — which `.daiv` line and which field/value/constraint
+/// were involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppErrorAt {
+    pub error: AppError,
+    /// 1-based line in the `.daiv` input; 0 when the failure is not
+    /// tied to one data line (e.g. a field missing at end of input).
+    pub line: usize,
+    /// Human-readable site description; empty when none applies.
+    pub context: String,
+}
+
+impl AppErrorAt {
+    pub fn bare(error: AppError) -> Self {
+        Self {
+            error,
+            line: 0,
+            context: String::new(),
+        }
+    }
+}
+
+impl fmt::Display for AppErrorAt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)?;
+        if !self.context.is_empty() {
+            write!(f, ": {}", self.context)?;
+        }
+        if self.line > 0 {
+            write!(f, " (line {})", self.line)?;
+        }
+        Ok(())
+    }
+}
+
 /// Any failure along the build pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipelineError {
@@ -135,6 +173,7 @@ pub enum PipelineError {
 impl fmt::Display for PipelineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            PipelineError::Lex(e) if e.line == 0 => e.error.fmt(f),
             PipelineError::Lex(e) => write!(f, "{} (line {})", e.error, e.line),
             PipelineError::App(e) => e.fmt(f),
             PipelineError::Other(s) => f.write_str(s),
