@@ -872,7 +872,7 @@ fn collation_tag(span: &str) -> Result<Option<&str>, AppError> {
     else {
         return Ok(None);
     };
-    #[cfg(feature = "collation")]
+    #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
     if crate::collate::resolves(tag) {
         return Ok(Some(tag));
     }
@@ -882,7 +882,7 @@ fn collation_tag(span: &str) -> Result<Option<&str>, AppError> {
 
 fn check_constraint(c: &Constraint, span: &str, value: &str) -> Result<(), AppError> {
     let ctag = collation_tag(span)?;
-    #[cfg(not(feature = "collation"))]
+    #[cfg(not(any(feature = "collation-icu", feature = "collation-colligo")))]
     let _ = ctag;
     match c {
         Constraint::Pattern(body) => {
@@ -895,7 +895,7 @@ fn check_constraint(c: &Constraint, span: &str, value: &str) -> Result<(), AppEr
             // Collation governs order: a `..lex[tag]` range compares
             // under the tag's collation, not byte order (SPEC.md
             // § Reference Collation).
-            #[cfg(feature = "collation")]
+            #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
             if let Some(tag) = ctag {
                 return match crate::collate::range_ok(tag, value, lo.as_deref(), hi.as_deref()) {
                     Some(true) => Ok(()),
@@ -911,7 +911,7 @@ fn check_constraint(c: &Constraint, span: &str, value: &str) -> Result<(), AppEr
             // Collation governs equality too: `..lex[tag]` enum
             // membership is collation equality (SPEC.md § Reference
             // Collation).
-            #[cfg(feature = "collation")]
+            #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
             if let Some(tag) = ctag {
                 return match crate::collate::enum_has(tag, value, vs) {
                     Some(true) => Ok(()),
@@ -1185,7 +1185,7 @@ mod tests {
     /// Without the `collation` feature this is an L0-2 runtime:
     /// `..lex[locale]` rejects rather than falling back to byte
     /// order (SPEC.md § Collation).
-    #[cfg(not(feature = "collation"))]
+    #[cfg(not(any(feature = "collation-icu", feature = "collation-colligo")))]
     #[test]
     fn locale_collation_is_rejected() {
         let s = parse_csaiv(".!kaivschema 1 a/c\n!str ..lex[en]'::n=\n").unwrap();
@@ -1195,12 +1195,12 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "collation")]
+    #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
     #[test]
     fn locale_collation_ranges() {
         // Byte order puts "étude" (0xC3…) past "f", outside [e,f];
         // French collation keeps é with e, inside it.
-        let s = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex[fr-CA]'::n=\n").unwrap();
+        let s = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex[fr]'::n=\n").unwrap();
         assert!(validate(".!kaiv 1\n!str'::n=étude\n", &s).is_ok());
         assert_eq!(
             validate(".!kaiv 1\n!str'::n=granite\n", &s).map_err(|e| e.error),
@@ -1213,23 +1213,34 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "collation")]
+    #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
     #[test]
     fn locale_collation_enum_equality() {
-        // Collation governs equality: at primary strength (the
-        // `-u-ks-level1` override) accents are ignored, so "resume"
-        // is a member of {résumé}.
-        let s =
-            parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
-        assert!(validate(".!kaiv 1\n!str'::n=resume\n", &s).is_ok());
-        let tertiary = parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[en]'::n=\n").unwrap();
+        // Collation governs equality: the NFD spelling of "résumé"
+        // is a member of the NFC-spelled enum under fr, and a plain
+        // "resume" is not (tertiary default — accents distinguish).
+        let s = parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[fr]'::n=\n").unwrap();
+        assert!(validate(".!kaiv 1\n!str'::n=re\u{301}sume\u{301}\n", &s).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=resume\n", &tertiary).map_err(|e| e.error),
+            validate(".!kaiv 1\n!str'::n=resume\n", &s).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
+        );
+        // Strength overrides (`-u-ks-…`) split the backends: ICU4X
+        // honors them (primary strength ignores accents), colligo
+        // rejects the tag rather than silently collating at the
+        // wrong strength.
+        let s2 =
+            parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
+        #[cfg(feature = "collation-icu")]
+        assert!(validate(".!kaiv 1\n!str'::n=resume\n", &s2).is_ok());
+        #[cfg(all(feature = "collation-colligo", not(feature = "collation-icu")))]
+        assert_eq!(
+            validate(".!kaiv 1\n!str'::n=resume\n", &s2).map_err(|e| e.error),
+            Err(AppError::CollationUnsupported)
         );
     }
 
-    #[cfg(feature = "collation")]
+    #[cfg(any(feature = "collation-icu", feature = "collation-colligo"))]
     #[test]
     fn unresolvable_locale_tag_is_rejected() {
         // Malformed tag — and rejected up front, before any

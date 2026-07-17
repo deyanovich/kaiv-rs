@@ -1,5 +1,5 @@
 //! kaiv — reference implementation of the kaiv format, Levels 0–3
-//! (Level 3 collation behind the default `collation` feature).
+//! (Level 3 collation behind the default `collation-icu` feature).
 //!
 //! Pipeline (SPEC.md, ARCHITECTURE.md §7):
 //!
@@ -22,7 +22,20 @@ pub mod avro;
 pub mod builder;
 #[cfg(feature = "cbor")]
 pub mod cbor;
-#[cfg(feature = "collation")]
+#[cfg(all(feature = "collation-icu", feature = "collation-colligo"))]
+compile_error!(
+    "`collation-icu` and `collation-colligo` are mutually exclusive \
+     collation backends — enable at most one"
+);
+/// Level 3 collation backend: ICU4X (`collation-icu`, the default —
+/// full CLDR fidelity) or colligo (`collation-colligo` — lightweight,
+/// context-free exact tiers). With neither, only the default byte
+/// order is available and `..lex[locale]` spans reject.
+#[cfg(feature = "collation-icu")]
+#[path = "collate_icu.rs"]
+pub mod collate;
+#[cfg(all(feature = "collation-colligo", not(feature = "collation-icu")))]
+#[path = "collate_colligo.rs"]
 pub mod collate;
 pub mod compiler;
 pub mod config;

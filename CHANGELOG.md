@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.5.0] - 2026-07-17
+--------------------
+
+### Added
+
+- **A second collation backend: `collation-colligo`.** Level 3
+  locale collation now selects between two mutually exclusive
+  backends. The default is unchanged in behavior from 0.4.0:
+  `collation-icu` (full-fidelity ICU4X — every locale and `-u-`
+  strength/case/variable override the spec recognizes; the
+  `collation` feature name remains as an alias). The new opt-in
+  `collation-colligo` builds on the colligo collator instead — a
+  fraction of the dependency weight (~100 KB vs ~1.3 MB of data),
+  wasm-friendly, derived from the same pinned reference line
+  (CLDR 48.2 / UCA 17.0.0) and verified against the ICU oracle.
+  Under colligo only exact-fidelity locales resolve: approximate
+  or deliberately divergent tailorings (`fr-CA`, `ru`),
+  unsupported scripts (`ja`), and any tag carrying a BCP 47
+  extension report `CollationUnsupportedError` instead of
+  collating — rejecting is always conforming at Level 3, silently
+  disagreeing is not. Comparisons run at the pinned tertiary
+  defaults with UCA lowercase-first case order.
+  `collate::CLDR_VERSION` is "48" under either backend. Enabling
+  both backends is a compile error; enabling neither leaves the
+  built-in byte order only, with `..lex[locale]` rejecting as
+  before.
+- kaiv-wasm (unpublished) enables `collation-colligo`: Level 3 in
+  the browser at 1.9 MB total, where the ICU4X data would have
+  tripled the module.
+
+
 [0.4.0] - 2026-07-17
 --------------------
 

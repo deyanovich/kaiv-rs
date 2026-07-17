@@ -20,7 +20,10 @@
 #[test]
 fn stress_suite_skipped_without_converter_features() {
     panic!(
-        "stress suite compiled to zero tests: build with `cargo test --all-features` \
-         or run at the workspace root where kaiv-cli unifies the converter features"
+        "stress suite compiled to zero tests: enable the converter features \
+         (all of json/yaml/toml/xml/cbor/avro/proto/asn1/graphql/xsd) or run \
+         at the workspace root where kaiv-cli unifies them — note that \
+         --all-features no longer works: it enables both mutually exclusive \
+         collation backends"
     );
 }

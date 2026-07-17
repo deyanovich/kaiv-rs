@@ -1,5 +1,5 @@
 [workspace]
-members = ["kaiv", "kaiv-cli"]
+members = ["kaiv", "kaiv-cli", "kaiv-wasm"]
 resolver = "2"
 
 # Workspace-level release profile (package-level profiles on non-root

@@ -5,7 +5,8 @@ Rust. A cargo workspace with two crates:
 
 - **`kaiv`** — the library. The certifiable reference pipeline;
   the Levels 0–2 core is zero-dependency, Level 3 collation rides
-  ICU4X behind the default-on `collation` feature.
+  ICU4X behind the default-on `collation-icu` feature (with a
+  lightweight `collation-colligo` alternative).
 - **`kaiv-cli`** — the `kaiv` command-line binary, a thin shell
   over the library. Kept out of the library crate so its (future)
   dependencies never reach library consumers.
@@ -109,14 +110,22 @@ resolution is the `net` feature — on by default, disabled via
 immutable eternalinks, cached without revalidation under
 `~/.cache/kaiv` (`KAIV_CACHE_DIR` / `/cache::dir` in `kaiv.kaiv`
 override); `KAIV_OFFLINE=1` or `kaiv --offline` resolves from the
-cache only. Level 3 locale collation (`..lex[locale]`) is the
-`collation` feature — on by default, backed by ICU4X (the CLDR
-data grows the binary by roughly 1.3 MB; disable via
-`default-features = false` for a lean Level 0–2 runtime, where
-`..lex[locale]` is a `CollationUnsupportedError`, never a silent
-byte-order fallback). The embedded data is CLDR 48
-(`kaiv::collate::CLDR_VERSION`), matching the spec's pinned
-reference version. Not yet
+cache only. Level 3 locale collation (`..lex[locale]`) has
+two mutually exclusive backends: `collation-icu` — on by default,
+full-fidelity ICU4X, every locale and `-u-` override the spec
+recognizes (the CLDR data grows the binary by roughly 1.3 MB) —
+and the opt-in `collation-colligo`, a lightweight context-free
+backend ([colligo](https://crates.io/crates/colligo), ~100 KB)
+that serves its exactly-reproducible locales and honestly rejects
+the rest (`fr-CA`, `ja`, `-u-` extensions →
+`CollationUnsupportedError`). Enabling both is a compile error;
+`collation` remains an alias for `collation-icu`. With neither
+(`default-features = false`) you get a lean Level 0–2 runtime
+where `..lex[locale]` is a `CollationUnsupportedError` and only
+the built-in byte order remains — never a silent byte-order
+fallback. The embedded data is CLDR 48
+(`kaiv::collate::CLDR_VERSION`) under either backend, matching
+the spec's pinned reference version. Not yet
 implemented, by design at this stage: Level 4 entirely,
 map key-pattern clauses, quoted names as interior path
 segments, and `..time`/`..ver` span semantics beyond canonical-form

@@ -1,0 +1,23 @@
+[package]
+name = "kaiv-wasm"
+description = "Browser playground entry point for the kaiv toolchain"
+# Mirrors the kaiv core version it wraps; surfaced in the
+# playground footer via version().
+version = "0.5.0"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# No default features except the ones wasm can carry: `net`
+# (ureq) cannot target wasm, and the default ICU4X collation
+# backend would triple the module size — the colligo backend
+# gives Level 3 in the browser at a fraction of the data weight.
+kaiv = { path = "../kaiv", default-features = false, features = [
+  "json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1",
+  "graphql", "xsd", "collation-colligo",
+] }
+wasm-bindgen = "0.2"
