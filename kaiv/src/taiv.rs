@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct TypeLib {
-    /// Library path from `.!kaivtype` (e.g. `std/core`, `acme/net`).
+    /// Library path from `.!taiv` (e.g. `std/core`, `acme/net`).
     pub library: String,
     /// Type name → definition, unlowered (base-type references and
     /// `&name` same-library references still symbolic).
@@ -37,8 +37,8 @@ pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
         match &line.kind {
             LineKind::Blank | LineKind::Comment(_) | LineKind::Doc(_) => {}
             LineKind::Decl(s) => {
-                // `.!kaivtype VERSION LIBRARY-ID`
-                if let Some(rest) = s.strip_prefix(".!kaivtype") {
+                // `.!taiv VERSION LIBRARY-ID`
+                if let Some(rest) = s.strip_prefix(".!taiv") {
                     let mut toks = rest.split_ascii_whitespace();
                     let _version = toks.next();
                     if let Some(lib) = toks.next() {
@@ -82,7 +82,7 @@ pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
     }
     if library.is_empty() {
         return Err(PipelineError::Other(
-            "missing .!kaivtype declaration in .taiv".into(),
+            "missing .!taiv declaration in .taiv".into(),
         ));
     }
     Ok(TypeLib { library, types })
@@ -202,10 +202,10 @@ mod tests {
 #[cfg(test)]
 mod net_math_tests {
     fn accepts(lib: &str, ty: &str, value: &str) -> bool {
-        let saiv = format!(".!kaivschema 1 t/x\n.!types {lib}\n\n&{ty}\nv=\n");
+        let saiv = format!(".!saiv 1 t/x\n.!types {lib}\n\n&{ty}\nv=\n");
         let csaiv = crate::compile_schema(saiv.as_bytes()).unwrap();
         let sc = crate::parse_csaiv(&csaiv).unwrap();
-        let daiv = format!(".!kaiv 1\n!str'::v={value}\n");
+        let daiv = format!(".!daiv\n!str'::v={value}\n");
         crate::validate(&daiv, &sc).is_ok()
     }
 

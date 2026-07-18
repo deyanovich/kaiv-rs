@@ -164,12 +164,12 @@ mod tests {
         let (base, _h) = serve(vec![(
             "/acme/net.taiv".into(),
             "200 OK".into(),
-            ".!kaivtype 1 acme/net\n".into(),
+            ".!taiv 1 acme/net\n".into(),
         )]);
         let root = tmp_root("cache");
         let url = format!("{base}/acme/net.taiv");
         let a = fetch(&url, Some(&root), false).unwrap();
-        assert_eq!(a, b".!kaivtype 1 acme/net\n");
+        assert_eq!(a, b".!taiv 1 acme/net\n");
         // Second fetch is served from the cache — works offline.
         let b = fetch(&url, Some(&root), true).unwrap();
         assert_eq!(a, b);

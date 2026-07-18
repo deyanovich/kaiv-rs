@@ -1,4 +1,4 @@
-.!kaivtype 1 std/net
+.!taiv 1 std/net
 
 // Network identifiers. Patterns are pinned to their defining
 // documents; the \x27 escape carries the apostrophe that RFC 3986

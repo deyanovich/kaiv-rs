@@ -469,7 +469,7 @@ pub(crate) fn import_val(members: &[(String, Val)], flat: bool) -> Result<String
             _ => fields.push_str(&embed_line(&key, "=", v, &mut needs)),
         }
     }
-    let mut out = String::from(".!kaiv 1\n");
+    let mut out = String::from(".!kaiv\n");
     for lib in &needs {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -687,6 +687,16 @@ fn scalar_parts(v: &Val, needs: &mut Needs) -> Option<(String, String)> {
         }
         Val::Str(s) if flat_ok(s) => Some((String::new(), s.clone())),
         Val::Str(s) => {
+            // Multi-line text stays readable as core `!text`: lines
+            // joined with the fixed `|:|` separator (SPEC.md § The
+            // text Type). Only LF-separated content qualifies —
+            // a CR, a literal `|:|` in the content, or any other
+            // flat_ok violation in the joined form falls back to
+            // the std/enc embedding, which carries anything.
+            let joined = s.replace('\n', "|:|");
+            if s.contains('\n') && !s.contains("|:|") && flat_ok(&joined) {
+                return Some(("!text\n".into(), joined));
+            }
             needs.insert("std/enc".to_string());
             Some(("&json\n".into(), b64url_encode(json_string(s).as_bytes())))
         }
@@ -1112,6 +1122,10 @@ fn render_node(type_name: &str, value: &str) -> Result<Node, PipelineError> {
         "bool" => return Err(err(format!("!bool value is not true/false: {value}"))),
         "null" if value.is_empty() => "null".to_string(),
         "null" => return Err(err("!null value carries a payload")),
+        // `!text`: the `|:|` separators resolve to newlines here —
+        // export is the only layer that interprets them (SPEC.md
+        // § The text Type).
+        "text" => json_string(&value.replace("|:|", "\n")),
         "std/enc/json" => {
             let bytes = b64url_decode(value).ok_or_else(|| err("invalid base64url payload"))?;
             let text =
@@ -1355,20 +1369,45 @@ mod tests {
         let out = import(br#"{"host":"web01","port":8080,"ratio":1e2,"big":9007199254740993,"on":true,"note":null}"#).unwrap();
         assert_eq!(
             out,
-            ".!kaiv 1\n\nhost=web01\n!int\nport=8080\n!float\nratio=1e2\n!int\nbig=9007199254740993\n!bool\non=true\n!null\nnote=\n"
+            ".!kaiv\n\nhost=web01\n!int\nport=8080\n!float\nratio=1e2\n!int\nbig=9007199254740993\n!bool\non=true\n!null\nnote=\n"
         );
     }
 
     #[test]
     fn import_embeds_unrepresentable() {
-        let out = import(br#"{"nested":{"a":[1,2]},"multi":"l1\nl2","ref":"$x","weird key":"v"}"#)
-            .unwrap();
-        assert!(out.starts_with(".!kaiv 1\n.!types std/enc\n"));
+        let out = import(
+            br#"{"nested":{"a":[1,2]},"multi":"l1\nl2","sep":"a |:| b\nc","ref":"$x","weird key":"v"}"#,
+        )
+        .unwrap();
+        assert!(out.starts_with(".!kaiv\n.!types std/enc\n"));
         // The object and its array member both go native now.
         assert!(out.contains("!int\n/nested/@a;=1;2\n"));
-        let multi = b64url_encode(b"\"l1\\nl2\"");
-        assert!(out.contains(&format!("&json\nmulti={multi}\n")));
+        // LF-only multi-line text imports readable as core !text…
+        assert!(out.contains("!text\nmulti=l1|:|l2\n"));
+        // …but content carrying a literal `|:|` falls back to the
+        // std/enc embedding (SPEC.md § The text Type).
+        let sep = b64url_encode(b"\"a |:| b\\nc\"");
+        assert!(out.contains(&format!("&json\nsep={sep}\n")));
         assert!(out.contains("\"weird key\"=v\n"));
+    }
+
+    #[test]
+    fn text_type_roundtrip() {
+        // Multi-line strings travel readable: import emits !text with
+        // the fixed `|:|` separator; export resolves it back — the
+        // only layer that interprets the separator.
+        let src = br#"{"basho":"old pond\na frog jumps in\nsound of water","trail":"a\nb\n"}"#;
+        let authored = import(src).unwrap();
+        assert!(authored.contains("!text\nbasho=old pond|:|a frog jumps in|:|sound of water\n"));
+        assert!(authored.contains("!text\ntrail=a|:|b|:|\n"));
+        let raiv = crate::compile(authored.as_bytes()).unwrap();
+        let daiv = crate::denorm::denormalize(&raiv).unwrap();
+        assert!(daiv.contains("!text'::basho=old pond|:|a frog jumps in|:|sound of water\n"));
+        assert_eq!(export(&daiv).unwrap().trim_end(), std::str::from_utf8(src).unwrap());
+        // CR-carrying content is not LF-only text: std/enc carries it.
+        let cr = import(br#"{"dos":"a\r\nb"}"#).unwrap();
+        assert!(!cr.contains("!text"));
+        assert!(cr.contains("&json\ndos="));
     }
 
     #[test]

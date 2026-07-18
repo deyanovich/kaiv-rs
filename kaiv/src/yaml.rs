@@ -182,10 +182,13 @@ mod tests {
     }
 
     #[test]
-    fn multiline_string_embeds() {
+    fn multiline_string_imports_as_text() {
+        // A block scalar is LF-only multi-line: it travels readable
+        // as core !text (trailing newline = trailing separator), no
+        // std/enc import needed.
         let out = import(b"motd: |\n  hello\n  world\n").unwrap();
-        assert!(out.contains(".!types std/enc"));
-        assert!(out.contains("&json\nmotd="));
+        assert!(!out.contains(".!types std/enc"));
+        assert!(out.contains("!text\nmotd=hello|:|world|:|\n"));
     }
 
     #[test]

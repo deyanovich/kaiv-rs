@@ -3,7 +3,7 @@
 //! the whitespace-free annotation position (`!int[1,65535]:s?prov`) and
 //! the space-separated constraint-line position (`/re/ ..num [1,65535]`).
 
-pub const CORE_TYPES: &[&str] = &["int", "float", "bool", "null", "b64", "str", "map"];
+pub const CORE_TYPES: &[&str] = &["int", "float", "bool", "null", "b64", "text", "str", "map"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {

@@ -1,4 +1,4 @@
-.!kaivtype 1 std/num
+.!taiv 1 std/num
 
 // Numeric marker values. kaiv floats are deliberately finite -- the
 // ..num span is a total, decidable order -- so the IEEE non-finite

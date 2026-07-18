@@ -205,7 +205,7 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
             }
         }
     }
-    let mut out = format!(".!kaivschema 1 {name}\n");
+    let mut out = format!(".!saiv 1 {name}\n");
     for lib in &imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -398,9 +398,9 @@ mod tests {
 
     #[test]
     fn infers_types_arrays_and_tables() {
-        let daiv = ".!kaiv 1\n!str'::name=eu1\n!int'::port=8443\n!float'::ratio=2.5\n!null'::note=\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!int'/@ports::0=80\n!int'/@ports::1=443\n!str'/@servers/0::host=a\n!int'/@servers/0::port=1\n!str'/@servers/1::host=b\n!int'/@servers/1::port=2\n!str'/@servers/1::role=spare\n";
+        let daiv = ".!daiv\n!str'::name=eu1\n!int'::port=8443\n!float'::ratio=2.5\n!null'::note=\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!int'/@ports::0=80\n!int'/@ports::1=443\n!str'/@servers/0::host=a\n!int'/@servers/0::port=1\n!str'/@servers/1::host=b\n!int'/@servers/1::port=2\n!str'/@servers/1::role=spare\n";
         let saiv = infer(daiv, "acme/cluster").unwrap();
-        assert!(saiv.starts_with(".!kaivschema 1 acme/cluster\n.!types std/time\n"));
+        assert!(saiv.starts_with(".!saiv 1 acme/cluster\n.!types std/time\n"));
         assert!(saiv.contains("name=\n"));
         assert!(saiv.contains("!int\nport=\n"));
         assert!(saiv.contains("!null|str\nnote=\n"));
@@ -423,9 +423,9 @@ mod tests {
         // joins the set: bare types validate structurally (the float
         // pattern accepts int tokens), unions are tagged by name — a
         // union that dropped `int` would reject its own example.
-        let daiv = ".!kaiv 1\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n";
+        let daiv = ".!daiv\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n";
         assert!(infer(daiv, "t").unwrap().contains("!float\n/@xs;=\n"));
-        let daiv = ".!kaiv 1\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n!null'/@xs::2=\n";
+        let daiv = ".!daiv\n!int'/@xs::0=1\n!float'/@xs::1=2.5\n!null'/@xs::2=\n";
         let saiv = infer(daiv, "t").unwrap();
         assert!(saiv.contains("!null|float|int\n/@xs;=\n"));
         let c = crate::compile_schema(saiv.as_bytes()).unwrap();
@@ -438,7 +438,7 @@ mod tests {
         // An array with both scalar elements and namespace elements
         // is outside the compiled subset — infer skips it and the
         // (relaxed) schema still validates the document.
-        let daiv = ".!kaiv 1\n!int'/@mixed::0=1\n!int'/@mixed/1::x=2\n!str'::after=z\n";
+        let daiv = ".!daiv\n!int'/@mixed::0=1\n!int'/@mixed/1::x=2\n!str'::after=z\n";
         let saiv = infer(daiv, "t").unwrap();
         assert!(saiv.contains("// skipped"));
         assert!(!saiv.contains("/@mixed;="));
@@ -451,7 +451,7 @@ mod tests {
     fn exotic_names_survive_inference() {
         // Quoted names containing `=` split quote-aware; a field
         // named `re` is spelled quoted (reserved in schema files).
-        let daiv = ".!kaiv 1\n!str'::\"a=b\"=x\n!str'::re=y\n";
+        let daiv = ".!daiv\n!str'::\"a=b\"=x\n!str'::re=y\n";
         let saiv = infer(daiv, "t").unwrap();
         assert!(saiv.contains("\"a=b\"=\n"));
         assert!(saiv.contains("\"re\"=\n"));
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn unsupported_shapes_skip_with_comment() {
-        let daiv = ".!kaiv 1\n!str'/@m/0/@inner::0=x\n";
+        let daiv = ".!daiv\n!str'/@m/0/@inner::0=x\n";
         let saiv = infer(daiv, "t").unwrap();
         assert!(saiv.contains("// skipped"));
         let c = crate::compile_schema(saiv.as_bytes()).unwrap();

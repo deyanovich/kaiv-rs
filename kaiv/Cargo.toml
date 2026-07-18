@@ -3,7 +3,7 @@ name = "kaiv"
 # 0.2.0: complete rewrite. 0.1.0 was the Era 1 "kv format" CLI tool;
 # this is the library-only reference implementation of the current
 # kaiv format (Levels 0-2), with the CLI split into `kaiv-cli`.
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.84.0"
 license = "MIT OR Apache-2.0"

@@ -61,11 +61,17 @@ fn valid_vectors() {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let input = fs::read(dir.join("input.kaiv")).unwrap();
         let expected_daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
-        // A missing expected.raiv means "same as .daiv" (per the README);
-        // any OTHER read error is a real problem, not a silent fallback.
+        // A missing expected.raiv means "same as .daiv except the
+        // first line reads .!raiv" (per the README); any OTHER read
+        // error is a real problem, not a silent fallback.
         let expected_raiv = match fs::read_to_string(dir.join("expected.raiv")) {
             Ok(s) => s,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => expected_daiv.clone(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => expected_daiv
+                .strip_prefix(".!daiv")
+                .map(|rest| format!(".!raiv{rest}"))
+                .unwrap_or_else(|| {
+                    panic!("{name}: expected.daiv does not open with .!daiv")
+                }),
             Err(e) => panic!("{name}: cannot read expected.raiv: {e}"),
         };
 
@@ -241,4 +247,83 @@ fn invalid_vectors() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
+#[test]
+fn fmt_preserves_compilation() {
+    // `kaiv fmt` is semantics-neutral: for every valid vector the
+    // formatted source compiles to the identical .raiv, and the
+    // formatter is idempotent.
+    let mut failures = Vec::new();
+    for dir in subdirs(&conformance_dir().join("valid")) {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let input = fs::read_to_string(dir.join("input.kaiv")).unwrap();
+        let expected_raiv = {
+            let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
+            match fs::read_to_string(dir.join("expected.raiv")) {
+                Ok(s) => s,
+                Err(_) => daiv
+                    .strip_prefix(".!daiv")
+                    .map(|rest| format!(".!raiv{rest}"))
+                    .unwrap(),
+            }
+        };
+        let resolver = resolver_for(&dir);
+        let fmted = match kaiv::format_data(&input) {
+            Ok(f) => f,
+            Err(e) => {
+                failures.push(format!("{name}: fmt failed: {e:?}"));
+                continue;
+            }
+        };
+        match kaiv::format_data(&fmted) {
+            Ok(again) if again == fmted => {}
+            Ok(again) => failures.push(format!(
+                "{name}: fmt not idempotent\n--- once ---\n{fmted}--- twice ---\n{again}"
+            )),
+            Err(e) => failures.push(format!("{name}: refmt failed: {e:?}")),
+        }
+        match kaiv::compile_with(fmted.as_bytes(), &resolver) {
+            Ok(raiv) => {
+                if raiv != expected_raiv {
+                    failures.push(format!(
+                        "{name}: fmt changed semantics\n--- fmt ---\n{fmted}--- got ---\n{raiv}--- want ---\n{expected_raiv}"
+                    ));
+                }
+            }
+            Err(e) => failures.push(format!("{name}: fmt output does not compile: {e:?}\n--- fmt ---\n{fmted}")),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn lift_round_trips() {
+    // Lifting a canonical .daiv to authored kaiv and rebuilding it
+    // reproduces the identical .daiv.
+    let mut failures = Vec::new();
+    for dir in subdirs(&conformance_dir().join("valid")) {
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
+        let resolver = resolver_for(&dir);
+        let lifted = match kaiv::lift(&daiv) {
+            Ok(l) => l,
+            Err(e) => {
+                failures.push(format!("{name}: lift failed: {e:?}"));
+                continue;
+            }
+        };
+        let rebuilt = kaiv::compile_with(lifted.as_bytes(), &resolver)
+            .and_then(|r| kaiv::denormalize_with(&r, &resolver));
+        match rebuilt {
+            Ok(d2) if d2 == daiv => {}
+            Ok(d2) => failures.push(format!(
+                "{name}: lift round-trip drifted\n--- lifted ---\n{lifted}--- rebuilt ---\n{d2}--- want ---\n{daiv}"
+            )),
+            Err(e) => failures.push(format!(
+                "{name}: lifted form does not build: {e:?}\n--- lifted ---\n{lifted}"
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }

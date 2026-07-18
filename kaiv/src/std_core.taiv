@@ -1,4 +1,4 @@
-.!kaivtype 1 std/core
+.!taiv 1 std/core
 
 // Integer — decimal string with numeric ordering
 /^-?[0-9]+$/ ..num
@@ -19,3 +19,8 @@
 // Base64url-encoded binary data (RFC 4648 section 5, unpadded)
 /^[A-Za-z0-9_-]*$/
 &b64=
+
+// Multi-line text in readable form — the value is a |:|-separated
+// sequence of lines. The separator is interpreted only at the
+// application/export layer; within kaiv the value is verbatim.
+&text=

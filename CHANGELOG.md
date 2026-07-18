@@ -7,6 +7,126 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.6.0] - 2026-07-18
+--------------------
+
+### Added
+
+- **`kaiv fmt` — the standard formatter for authoring files.**
+  Normalizes an authored `.kaiv` into the standard style with an
+  optimizing pretty-printer: for every group of fields it chooses
+  among the three equivalent syntaxes — a flat namepath line for a
+  single field, the inline assignment (`/path:=a=1|b=2`,
+  `/@arr+:=...`) for small all-string groups within 72 columns,
+  and the `(...)`/`[...]` block form for anything larger, typed,
+  or commented. Array runs render uniformly (one element needing
+  the block form puts them all in blocks). Authored blank lines
+  act as grouping hints; comments, variables, splats, and every
+  value byte are preserved, fields are never reordered, and
+  `compile(fmt(x)) == compile(x)` holds across the conformance
+  tree (enforced by a new conformance-level property test,
+  alongside fmt idempotency). A canonical `.daiv`/`.raiv` input is
+  instead *lifted* into idiomatic authored kaiv — the human view
+  of a machine artifact (round-trip enforced: rebuilding the
+  lifted form reproduces the identical `.daiv`). Schema-side
+  authoring kinds (`.saiv`/`.taiv`/`.faiv`/`.maiv`) get light
+  whitespace/blank-line normalization only. CLI:
+  `kaiv fmt [file] [-w] [--check]` (stdin default; `-w` in-place;
+  `--check` for CI). Library: `format_data`, `format_plain`,
+  `lift` in a new `fmt` module.
+- **`KaivBuilder`** — the authored-form sibling of `DaivBuilder`:
+  the identical value-level API (declarations, typed leaves, units,
+  provenance), with `finish()` rendering through the formatter's
+  lift, so generated documents destined for human eyes come out in
+  idiomatic authored kaiv (grouped blocks, inline assignments,
+  implicit `str`, `$` re-escaped).
+- **Mappings (`.maiv`) implemented** — SPEC.md § Mappings, end to
+  end: parser (bare `.!maiv` header; a mapping's identity is its
+  `.!source`/`.!target` endpoint pair), publish-time validation
+  (namepath existence, override admissibility, and the static
+  required-field completeness check — new `IncompleteMappingError`),
+  the streaming mapper (source `.daiv` → target `.daiv`, assembled
+  in target schema order, target defaults materialized, `.!schema`
+  declaration emitted), `/*` array wildcards, `|constant` and
+  `|!null` overrides, and composition as a namepath join with the
+  `.!via` trail recorded by edge identity. CLI: `kaiv mapping
+  validate | apply | compose`. Registry addressing is derived
+  and self-evident —
+  `s.kaiv.io/{source}/mapto/{target}/{version}.maiv` published
+  by the source owner, `{target}/mapfrom/{source}/{version}.maiv`
+  by the target owner — the direction marker makes the address
+  read as a sentence and records who vouches for the edge;
+  same-namespace short forms, mandatory edition segment,
+  `mapto`/`mapfrom` reserved on the registries.
+- **Information units built in** — the bit `b` and byte `B`
+  (= 8 b) join the curated unit set as a base dimension of
+  their own, with the SI decimal multiples (`kB`…`PB`,
+  `kb`…`Pb`, ×1000) and the IEC binary multiples
+  (`KiB`…`PiB`, `Kib`…`Pib`, ×1024) — IEC prefixes restricted
+  to information units, multiplying prefixes only. The telecom
+  rate spellings `bps kbps Mbps Gbps Tbps` are accepted as
+  input and canonicalize to the decimal-bit compounds
+  (`Mb/s`, never mebibits). **`KB`/`Kb` are rejected as
+  ambiguous at the unit grammar level** (JEDEC 1024 vs SI-read
+  1000), with a teaching error naming both resolutions — no
+  context, including a custom `.faiv`, can claim the spelling.
+- **The `!text` type** — a seventh `std/core` canonical
+  shorthand: multi-line text in readable form, the value's
+  lines joined by the fixed `|:|` separator. Interpretation
+  happens only at the application/export layer; within kaiv the
+  value is verbatim. Importers now emit `!text` for LF-only
+  multi-line strings (readable, greppable) instead of the
+  base64 `std/enc` embedding — content carrying a CR or a
+  literal `|:|` still falls back to `std/enc`. In schemas,
+  `!text` is retained as a type item in the compiled `.csaiv`,
+  with the str→text coercion: a plain `!str` line satisfies a
+  `!text` field when its value carries no literal `|:|` (a
+  `|:|`-carrying value is `DelimiterCollisionError` — the
+  retype would reinterpret it), and the schema-aware
+  Denormalizer retypes coerced lines to `!text` in the `.daiv`.
+  The reverse direction stays a `TypeMismatchError`.
+- **Empty-stdin guard** — the stdin-reading commands reject
+  empty standard input with a pipeline-failure hint (an
+  upstream `kaiv import` failure would otherwise let `build`
+  exit 0 on nothing); an intentionally empty document still
+  builds when passed as a file.
+- **`kaiv validate` reads stdin** — omit the data argument, or
+  pass `-` when also naming a schema file: `kaiv build x.kaiv |
+  kaiv validate`. Piped `.!raiv` input is denormalized
+  (schema-aware) before validation.
+
+### Changed
+
+- **Per-kind format declarations.** The declaration keyword now
+  mirrors the file extension — `.!kaiv`/`.!raiv`/`.!daiv` for
+  data and `.!maiv` for mappings (version optional; the bare
+  form is canonical and means version 1),
+  `.!saiv`/`.!csaiv`/`.!taiv`/`.!faiv` (version required) for
+  the identity-carrying kinds. The old
+  `.!kaivschema`/`.!kaivtype`/`.!kaivunit`/`.!kaivmap`/
+  `.!kaivmetaschema` names are gone. The declaration is
+  optional in authored `.kaiv` (absence means version 1 — any
+  well-formed `.env` file is valid kaiv); the pipeline rewrites
+  the keyword at each stage and canonical consumers require the
+  matching kind (new `FORMAT_KIND_ERROR`).
+- **`std/enc` `txt` renamed to `plain`** (`&plain`,
+  `!std/enc/plain`) to remove the near-collision with `!text`.
+- The `canonical_input` `.raiv` path (CLI) and the gate's
+  `.kaiv`/`.raiv` deposit paths denormalize schema-aware, so
+  absent optional fields are materialized before validation.
+
+- **`kaiv login` / `kaiv whoami` / `kaiv logout`** — identity
+  against the kaiv registries (idaiv), on the literium model:
+  the passwordless email-link device authorization grant (an
+  emailed one-time link approves the device; the first sign-in
+  creates the account), a rotating refresh token stored at
+  `~/.config/kaiv/credentials` (0600) with access tokens minted
+  on demand and rotation persisted before use, and best-effort
+  server-side revocation on logout. `KAIV_ID_URL` overrides the
+  identity host (default `https://id.kaiv.io` during the
+  alpha).
+
+
 [0.5.0] - 2026-07-17
 --------------------
 

@@ -24,6 +24,68 @@ const NON_SI: &[&str] = &[
     "min", "h", "d", "t", "L", "in", "ft", "yd", "mi", "nmi", "lb", "oz", "gal",
 ];
 
+/// Information units (SPEC.md § Built-in units): the bit `b` and the
+/// byte `B` (= 8 b) — a base dimension of its own. Only multiplying
+/// prefixes attach (a millibyte is not a thing): the SI decimal set
+/// k/M/G/T/P (×1000ⁿ) and the IEC binary set Ki/Mi/Gi/Ti/Pi
+/// (×1024ⁿ), the latter restricted to information units — a
+/// kibimeter stays invalid.
+const INFO_BASE: &[&str] = &["b", "B"];
+const INFO_DECIMAL_PREFIXES: &[&str] = &["k", "M", "G", "T", "P"];
+const INFO_BINARY_PREFIXES: &[&str] = &["Ki", "Mi", "Gi", "Ti", "Pi"];
+
+/// Is `name` an information unit — bare, or carrying one of the two
+/// permitted prefix families?
+fn info_unit(name: &str) -> bool {
+    if INFO_BASE.contains(&name) {
+        return true;
+    }
+    INFO_BINARY_PREFIXES
+        .iter()
+        .chain(INFO_DECIMAL_PREFIXES)
+        .any(|p| {
+            name.strip_prefix(p)
+                .is_some_and(|stem| INFO_BASE.contains(&stem))
+        })
+}
+
+/// Bit-rate aliases (telecom spellings): whole-expression input
+/// forms that canonicalize to the decimal-bit compound rates.
+/// `kbps` is 1000 bits per second everywhere networks are sold —
+/// never kibibits.
+const RATE_ALIASES: &[(&str, &str)] = &[
+    ("bps", "b/s"),
+    ("kbps", "kb/s"),
+    ("Mbps", "Mb/s"),
+    ("Gbps", "Gb/s"),
+    ("Tbps", "Tb/s"),
+];
+
+fn resolve_alias(expr: &str) -> &str {
+    RATE_ALIASES
+        .iter()
+        .find(|(a, _)| *a == expr)
+        .map(|(_, c)| *c)
+        .unwrap_or(expr)
+}
+
+/// The teaching rejection for the one famously ambiguous spelling
+/// family: `K` is not an SI prefix, and JEDEC `KB` (1024) collides
+/// with the decimal reading (1000). kaiv refuses to guess.
+pub fn ambiguity_hint(expr: &str) -> Option<String> {
+    let stem = expr.strip_prefix('K')?;
+    if INFO_BASE.contains(&stem) {
+        let (dec, bin) = match stem {
+            "B" => ("kB (1000 B)", "KiB (1024 B)"),
+            _ => ("kb (1000 b)", "Kib (1024 b)"),
+        };
+        return Some(format!(
+            "K{stem} is ambiguous: write {dec} or {bin}"
+        ));
+    }
+    None
+}
+
 /// SI decimal prefixes ("da" first so the two-char prefix wins).
 const PREFIXES: &[&str] = &[
     "da", "Y", "Z", "E", "P", "T", "G", "M", "k", "h", "d", "c", "m", "u", "n", "p", "f", "a", "z",
@@ -51,6 +113,7 @@ pub fn builtin(name: &str) -> bool {
         || SI_BASE.contains(&name)
         || SI_DERIVED.contains(&name)
         || NON_SI.contains(&name)
+        || info_unit(name)
     {
         return true;
     }
@@ -63,6 +126,7 @@ pub fn builtin(name: &str) -> bool {
 /// expression: built-in, a well-formed currency, or one of the
 /// document's imported custom units (`.!units` → `.faiv` definitions).
 pub fn members_ok(expr: &str, customs: &std::collections::BTreeSet<String>) -> bool {
+    let expr = resolve_alias(expr);
     let Some(names) = factor_names(expr) else {
         return false;
     };
@@ -83,7 +147,7 @@ fn factor_names(expr: &str) -> Option<Vec<String>> {
 }
 
 pub fn canonicalize(expr: &str) -> Option<String> {
-    Some(format_exps(&parse_expr(expr)?))
+    Some(format_exps(&parse_expr(resolve_alias(expr))?))
 }
 
 /// Parse a unit expression into name → signed exponent (grammar
@@ -113,6 +177,13 @@ fn parse_expr(expr: &str) -> Option<BTreeMap<String, i64>> {
                 return None;
             }
             let name: String = cs[start..i].iter().collect();
+            // The ambiguous JEDEC spellings are invalid at the
+            // grammar level — not merely non-members — so no
+            // context (including a custom .faiv) can claim them
+            // (SPEC.md § Built-in units, KB ambiguity).
+            if name == "KB" || name == "Kb" {
+                return None;
+            }
             // Grammar-level checks only: currency shape is fixed
             // (`~` + 3 uppercase); name membership is context-dependent
             // (imported custom units) and checked via members_ok.
@@ -500,5 +571,55 @@ mod tests {
         let customs: BTreeSet<String> = ["au".to_string()].into();
         assert!(members_ok("au/s", &customs));
         assert!(!members_ok("au/s", &none));
+    }
+}
+
+#[cfg(test)]
+mod info_tests {
+    use super::*;
+
+    #[test]
+    fn information_units_are_builtin() {
+        for u in ["b", "B", "kB", "MB", "GB", "TB", "PB", "kb", "Mb", "Gb", "Tb",
+                  "KiB", "MiB", "GiB", "TiB", "PiB", "Kib", "Mib", "Gib"] {
+            assert!(builtin(u), "{u} must be built-in");
+            assert_eq!(canonicalize(u).as_deref(), Some(u), "{u} is canonical");
+        }
+        // Only multiplying prefixes: no millibytes, no hectobits —
+        // and no kibimeters (IEC prefixes are information-only).
+        for u in ["mB", "cB", "hB", "daB", "uB", "nb", "Kim", "Mis", "KB", "Kb"] {
+            assert!(!builtin(u), "{u} must not be built-in");
+        }
+    }
+
+    #[test]
+    fn rate_aliases_canonicalize_to_decimal_bits() {
+        assert_eq!(canonicalize("bps").as_deref(), Some("b/s"));
+        assert_eq!(canonicalize("kbps").as_deref(), Some("kb/s"));
+        assert_eq!(canonicalize("Mbps").as_deref(), Some("Mb/s"));
+        assert_eq!(canonicalize("Gbps").as_deref(), Some("Gb/s"));
+        assert_eq!(canonicalize("Tbps").as_deref(), Some("Tb/s"));
+        // Compound information rates work like any compound.
+        assert_eq!(canonicalize("GB/s").as_deref(), Some("GB/s"));
+        assert_eq!(canonicalize("s^-1*MiB").as_deref(), Some("MiB/s"));
+        // Membership sees through the alias.
+        let none = std::collections::BTreeSet::new();
+        assert!(members_ok("Mbps", &none));
+    }
+
+    #[test]
+    fn kb_ambiguity_is_a_teaching_rejection() {
+        assert!(canonicalize("KB").is_none());
+        assert!(canonicalize("Kb").is_none());
+        assert_eq!(
+            ambiguity_hint("KB").as_deref(),
+            Some("KB is ambiguous: write kB (1000 B) or KiB (1024 B)")
+        );
+        assert_eq!(
+            ambiguity_hint("Kb").as_deref(),
+            Some("Kb is ambiguous: write kb (1000 b) or Kib (1024 b)")
+        );
+        assert!(ambiguity_hint("kB").is_none());
+        assert!(ambiguity_hint("Km").is_none());
     }
 }

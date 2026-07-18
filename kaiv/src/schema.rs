@@ -1,8 +1,9 @@
 //! The schema compiler: authored `.saiv` → compiled `.csaiv`
 //! (SPEC.md § The Schema Compiler). Lowers named types — core and
 //! registry-resolved — to their constraint forms; carries requiredness
-//! in the `=`/`?=` operator; propagates the `.!kaivschema` header
-//! (including the strict modifier) verbatim.
+//! in the `=`/`?=` operator; carries the `.!saiv` header (including
+//! the strict modifier) into the output with the keyword rewritten
+//! to `.!csaiv` (SPEC.md § Format Declaration).
 
 use crate::anno::{parse_annotation, parse_constraint_items, Annotation, Constraint, Item};
 use crate::error::{AppError, PipelineError};
@@ -53,7 +54,7 @@ pub fn check_type_lib(
     let lib = crate::taiv::parse_taiv(input)?;
     if lib.library.is_empty() {
         return Err(PipelineError::Other(
-            ".taiv missing .!kaivtype library identity".into(),
+            ".taiv missing .!taiv library identity".into(),
         ));
     }
     resolver.preload(&lib.library, "taiv", input.to_vec());
@@ -103,11 +104,16 @@ fn compile_schema_chain(
             // lexer never produces them for FileKind::Schema.
             LineKind::VarSplat(_) => unreachable!("var-splat in schema lex"),
             LineKind::Decl(s) => {
-                // .!kaivschema (with any strict modifier) passes through;
-                // .!types imports and .!registry overrides configure
-                // resolution and are resolved away at compile time.
-                if s.starts_with(".!kaivschema") || s.starts_with(".!provenance") {
-                    // Both propagate verbatim into the .csaiv header —
+                // .!saiv (with any strict modifier) is carried into
+                // the .csaiv header with the keyword rewritten to
+                // .!csaiv (SPEC.md § Format Declaration);
+                // .!provenance propagates verbatim. .!types imports
+                // and .!registry overrides configure resolution and
+                // are resolved away at compile time.
+                if let Some(rest) = s.strip_prefix(".!saiv") {
+                    out.push(format!(".!csaiv{rest}"));
+                } else if s.starts_with(".!provenance") {
+                    // Propagates verbatim into the .csaiv header —
                     // the Validator reads the compiled artifact.
                     out.push((*s).to_string());
                 } else if let Some(rest) = s.strip_prefix(".!schema") {
@@ -521,7 +527,7 @@ fn inherit(
         qualifier.is_some_and(|q| q.split('/').next_back().is_some_and(|s| s.starts_with('@')));
     for line in compiled.lines() {
         // Only field and collection lines inherit; the extending
-        // schema's own header (.!kaivschema, .!provenance) governs.
+        // schema's own header (.!saiv, .!provenance) governs.
         if line.is_empty() || line.starts_with(".!") || line.starts_with(".?") {
             continue;
         }
@@ -702,7 +708,13 @@ fn lower_with_defaults(
     if let Some(u) = &col.unit {
         items.insert(0, format!("!{}:{u}", a.type_name));
     }
-    if items.is_empty() {
+    // `text` is likewise retained by name: it lowers to no value
+    // constraints, but the annotation carries export semantics
+    // (`|:|` line separation), so the parallel scan must enforce it
+    // (SPEC.md § The text Type).
+    if a.type_name == "text" {
+        items.insert(0, "!text".into());
+    } else if items.is_empty() {
         items.push("!str".into());
     }
     // A field line may not begin with `#` (rule 2 → comment) or `//`
@@ -841,8 +853,11 @@ fn bucket_annotation(
     }
     match a.type_name.as_str() {
         // The identity type contributes nothing; maps are handled
-        // before lowering (map_namepath entry lines).
-        "" | "str" | "map" => {}
+        // before lowering (map_namepath entry lines). `text` lowers
+        // to no constraints but is retained as a type item — the
+        // annotation carries export semantics (SPEC.md § The text
+        // Type), so the parallel scan must enforce it.
+        "" | "str" | "map" | "text" => {}
         core if std_core().types.contains_key(core) => {
             if core == "b64" {
                 col.b64 = true;
@@ -921,7 +936,7 @@ mod tests {
     fn multi_segment_ns_block_scopes_symmetrically() {
         // `(/a/b) ... ()` must pop both segments; a field after the
         // close scopes at root, not the stale `/a`.
-        let out = compile_schema(b".!kaivschema 1 a/n\n(/a/b)\nhost=\n()\nport=\n").unwrap();
+        let out = compile_schema(b".!saiv 1 a/n\n(/a/b)\nhost=\n()\nport=\n").unwrap();
         assert!(out.contains("'/a/b::host="), "got: {out}");
         assert!(out.contains("'::port="), "got: {out}");
         assert!(!out.contains("'/a::port="), "stale prefix leaked: {out}");
@@ -929,12 +944,12 @@ mod tests {
 
     #[test]
     fn ns_block_schema_annotation_is_rejected() {
-        assert!(compile_schema(b".!kaivschema 1 a/n\n(/server schema:hub/x)\nhost=\n()\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/n\n(/server schema:hub/x)\nhost=\n()\n").is_err());
     }
 
     #[test]
     fn unit_on_union_type_is_rejected() {
-        assert!(compile_schema(b".!kaivschema 1 a/u\n!int:s|null\ntimeout=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/u\n!int:s|null\ntimeout=\n").is_err());
     }
 
     #[test]
@@ -942,30 +957,30 @@ mod tests {
         // Materialized lines carry no provenance, so required/source
         // plus an optional field can never validate — reject statically.
         assert!(compile_schema(
-            b".!kaivschema 1 a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
+            b".!saiv 1 a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
         )
         .is_err());
         assert!(compile_schema(
-            b".!kaivschema 1 a/p\n.!provenance:source\n!str\ntimeout?=5\n"
+            b".!saiv 1 a/p\n.!provenance:source\n!str\ntimeout?=5\n"
         )
         .is_err());
         // Required-only fields, or the none level, are fine.
         assert!(
-            compile_schema(b".!kaivschema 1 a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
+            compile_schema(b".!saiv 1 a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
         );
-        assert!(compile_schema(b".!kaivschema 1 a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
+        assert!(compile_schema(b".!saiv 1 a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
     }
 
     #[test]
     fn unit_or_constraints_on_map_type_are_rejected() {
-        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>:km\nsettings=\n").is_err());
-        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>[1,5]\nsettings=\n").is_err());
-        assert!(compile_schema(b".!kaivschema 1 a/m\n!map<int>\nsettings=\n").is_ok());
+        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>:km\nsettings=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>[1,5]\nsettings=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>\nsettings=\n").is_ok());
     }
 
     #[test]
     fn empty_pattern_field_is_not_swallowed_as_comment() {
-        let out = compile_schema(b".!kaivschema 1 a/p\n!str//\nname=\n").unwrap();
+        let out = compile_schema(b".!saiv 1 a/p\n!str//\nname=\n").unwrap();
         for line in out.lines() {
             assert!(
                 !line.trim_start().starts_with("//"),
@@ -1003,14 +1018,14 @@ mod tests {
     fn check_type_lib_lowers_all_definitions() {
         // Same-library &name reference and a core base type both
         // resolve without any external fetch.
-        let ok = b".!kaivtype 1 acme/net\n\n!int[1,65535]\n&port=\n\n&port [80,443]\n&webport=\n";
+        let ok = b".!taiv 1 acme/net\n\n!int[1,65535]\n&port=\n\n&port [80,443]\n&webport=\n";
         let lib = check_type_lib(ok, &dead_end()).unwrap();
         assert_eq!(lib.library, "acme/net");
         assert_eq!(lib.types.len(), 2);
 
         // A cross-library base reference to an unpublished library
         // fails, and the missing artifact is recorded for the host.
-        let dangling = b".!kaivtype 1 acme/net\n\n!other/lib/base\n&derived=\n";
+        let dangling = b".!taiv 1 acme/net\n\n!other/lib/base\n&derived=\n";
         let r = dead_end();
         assert!(check_type_lib(dangling, &r).is_err());
         assert_eq!(
@@ -1024,9 +1039,42 @@ mod tests {
 
     #[test]
     fn unit_on_non_numeric_type_is_rejected() {
-        assert!(compile_schema(b".!kaivschema 1 a/u\n!str:km\ndist=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/u\n!str:km\ndist=\n").is_err());
         // A numeric type is fine.
-        assert!(compile_schema(b".!kaivschema 1 a/u\n!float:km\ndist=\n").is_ok());
+        assert!(compile_schema(b".!saiv 1 a/u\n!float:km\ndist=\n").is_ok());
+    }
+
+    #[test]
+    fn text_type_is_retained_and_enforced() {
+        // `!text` lowers to no value constraints but the type item
+        // survives into .csaiv — the annotation carries export
+        // semantics, so the parallel scan enforces it.
+        let out = compile_schema(b".!saiv 1 a/n\n!text\nnote=\n").unwrap();
+        assert_eq!(out, ".!csaiv 1 a/n\n!text'::note=\n");
+        let sc = crate::validator::parse_csaiv(&out).unwrap();
+        assert!(crate::validate(".!daiv\n!text'::note=a|:|b\n", &sc).is_ok());
+        // str→text coercion: a plain string satisfies a text field —
+        // unless it carries a literal `|:|`, which the retype would
+        // reinterpret (SPEC.md § The text Type).
+        assert!(crate::validate(".!daiv\n!str'::note=a\n", &sc).is_ok());
+        assert_eq!(
+            crate::validate(".!daiv\n!str'::note=a|:|b\n", &sc).map_err(|e| e.error),
+            Err(AppError::DelimiterCollision)
+        );
+        // Any other type stays a mismatch — and so does the reverse
+        // direction (text data on a str-declared field).
+        assert_eq!(
+            crate::validate(".!daiv\n!int'::note=1\n", &sc).map_err(|e| e.error),
+            Err(AppError::TypeMismatch)
+        );
+        let strsc = crate::validator::parse_csaiv(".!csaiv 1 a/s\n!str'::note=\n").unwrap();
+        assert_eq!(
+            crate::validate(".!daiv\n!text'::note=a\n", &strsc).map_err(|e| e.error),
+            Err(AppError::TypeMismatch)
+        );
+        // `&text` resolves to the core shorthand like the others.
+        let d = crate::compile(b"&text\nbasho=a|:|b\n").unwrap();
+        assert!(d.contains("!text'::basho=a|:|b\n"));
     }
 
     #[test]
@@ -1035,12 +1083,12 @@ mod tests {
         // the .taiv definition shape above a field — implicit str,
         // lowered to a bare constraint group like !str + items.
         let csaiv = compile_schema(
-            b".!kaivschema 1 a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
+            b".!saiv 1 a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
         )
         .unwrap();
         assert_eq!(
             csaiv,
-            ".!kaivschema 1 a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
+            ".!csaiv 1 a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
         );
     }
 
@@ -1049,15 +1097,15 @@ mod tests {
         // A type-reference item has its own line forms; a `?`
         // provenance list and a stray no-`=` line have no .saiv
         // meaning. All reject rather than silently dropping.
-        assert!(compile_schema(b".!kaivschema 1 a/c\n/^[a-z]+$/ &port\nname=\n").is_err());
-        assert!(compile_schema(b".!kaivschema 1 a/c\n?required\nname=\n").is_err());
-        assert!(compile_schema(b".!kaivschema 1 a/c\nstray words\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/c\n/^[a-z]+$/ &port\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/c\n?required\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv 1 a/c\nstray words\nname=\n").is_err());
     }
 
     #[test]
     fn duplicate_schema_field_is_an_error() {
         assert_eq!(
-            compile_schema(b".!kaivschema 1 a/d\nhost=\nhost=\n"),
+            compile_schema(b".!saiv 1 a/d\nhost=\nhost=\n"),
             Err(PipelineError::App(AppError::SchemaDuplicateKey))
         );
     }
@@ -1066,7 +1114,7 @@ mod tests {
     fn url_reference_is_resolution_error() {
         // Network layers are unimplemented offline (SPEC.md § Type
         // Registry Resolution) — URL references fail loudly.
-        let saiv = b".!kaivschema 1 acme/x\n.!schema https://example.org/base.saiv\n";
+        let saiv = b".!saiv 1 acme/x\n.!schema https://example.org/base.saiv\n";
         assert_eq!(
             compile_schema(saiv),
             Err(PipelineError::App(AppError::SchemaResolution))

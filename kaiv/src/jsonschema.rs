@@ -65,7 +65,7 @@ pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
     if let Some(Val::Bool(false)) = get(top, "additionalProperties") {
         ctx.note("additionalProperties: false (kaiv strict is document-wide; not emitted)");
     }
-    let mut out = format!(".!kaivschema 1 {name}\n");
+    let mut out = format!(".!saiv 1 {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -834,7 +834,7 @@ mod tests {
         let saiv = import(src, "acme/svc").unwrap();
         // `when` is optional, so std/time joins as a fully-qualified
         // union alternative rather than an `&name` + import.
-        assert!(saiv.starts_with(".!kaivschema 1 acme/svc\n"));
+        assert!(saiv.starts_with(".!saiv 1 acme/svc\n"));
         assert!(saiv.contains("// Service name\nname=\n"));
         assert!(saiv.contains("!int[1,65535]\nport=8080\n"));
         // exclusiveMinimum on number: dropped with a note.
@@ -855,18 +855,18 @@ mod tests {
         let r = crate::Resolver::offline();
         let csaiv = crate::compile_schema(saiv.as_bytes()).unwrap();
         r.preload("acme/svc", "csaiv", csaiv.into_bytes());
-        let authored = ".!kaiv 1\n.!schema:acme/svc\n!str'::name=api\n!int'::port=443\n!str'::tier=gold\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!str'/@tags::0=a\n!str'/@servers/0::host=h\n!int'/limits::rps=5\n";
+        let authored = ".!raiv\n.!schema:acme/svc\n!str'::name=api\n!int'::port=443\n!str'::tier=gold\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!str'/@tags::0=a\n!str'/@servers/0::host=h\n!int'/limits::rps=5\n";
         let daiv = crate::denorm::denormalize_with(authored, &r).unwrap();
         assert!(daiv.contains("!null'::ratio=\n"));
         assert!(daiv.contains("!null'/@servers/0::port=\n"));
         assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // Required enforced; constraint enforced.
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'::name=api\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::RequiredFieldSchema)
         );
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'::name=api\n!int'::port=99999\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'::name=api\n!int'::port=99999\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }
@@ -897,7 +897,7 @@ mod tests {
         let sc = compiles(&saiv);
         assert_eq!(
             crate::validate(
-                ".!kaiv 1\n!str'::pre=a/b\n!str'::backref=\n!str'::shorthand=\n!str'::re=x\n",
+                ".!daiv\n!str'::pre=a/b\n!str'::backref=\n!str'::shorthand=\n!str'::re=x\n",
                 &sc
             ).map_err(|e| e.error),
             Ok(())
@@ -924,11 +924,11 @@ mod tests {
         assert!(saiv.contains("// dropped: minItems at root/tags"));
         let sc = compiles(&saiv);
         assert_eq!(
-            crate::validate(".!kaiv 1\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::CardinalityViolation)
         );
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'/@servers/0::host=h\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'/@servers/0::host=h\n", &sc).map_err(|e| e.error),
             Ok(())
         );
     }
@@ -960,7 +960,7 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("// dropped: multipleOf"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!kaiv 1\n!int'::n=7\n", &sc).map_err(|e| e.error), Ok(()));
+        assert_eq!(crate::validate(".!daiv\n!int'::n=7\n", &sc).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
@@ -972,7 +972,7 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("/^\\/[a-z\\/]+$/\npath?=\n"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!kaiv 1\n!str'::path=/a/b\n", &sc).map_err(|e| e.error), Ok(()));
+        assert_eq!(crate::validate(".!daiv\n!str'::path=/a/b\n", &sc).map_err(|e| e.error), Ok(()));
     }
 }
 

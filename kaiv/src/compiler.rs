@@ -28,11 +28,27 @@ pub fn compile_with(input: &[u8], resolver: &Resolver) -> Result<String, Pipelin
     if c.pending_anno.is_some() || c.pending_prov.is_some() {
         return Err(PipelineError::App(AppError::MetadataWithoutTarget));
     }
+    // Canonical output always opens with its kind's declaration
+    // (SPEC.md § Format Declaration) — the authored `.!kaiv` (or its
+    // absence) becomes bare `.!raiv`.
+    c.out.insert(0, ".!raiv".to_string());
     let mut out = c.out.join("\n");
-    if !out.is_empty() {
-        out.push('\n');
-    }
+    out.push('\n');
     Ok(out)
+}
+
+/// The format-declaration kinds a Compiler input must not declare —
+/// everything except authored `kaiv` (SPEC.md § Format Declaration).
+const FORMAT_KINDS: &[&str] = &[
+    "raiv", "daiv", "saiv", "csaiv", "taiv", "faiv", "maiv", "msaiv",
+];
+
+/// Whether `s` is the format declaration for `kind` — the keyword
+/// alone or followed by whitespace (and a version).
+fn is_format_decl(s: &str, kind: &str) -> bool {
+    s.strip_prefix(".!")
+        .and_then(|r| r.strip_prefix(kind))
+        .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t']))
 }
 
 struct Compiler<'r> {
@@ -414,6 +430,21 @@ impl<'r> Compiler<'r> {
                 Ok(())
             }
             LineKind::Decl(s) => {
+                // Format declarations: authored `.kaiv` may carry
+                // `.!kaiv [VERSION]` (or nothing); the Compiler emits
+                // `.!raiv` itself, so the authored declaration is
+                // consumed, not passed through. A declaration naming
+                // any other kind means this is not an authored `.kaiv`
+                // stream (SPEC.md § Format Declaration).
+                if is_format_decl(s, "kaiv") {
+                    return Ok(());
+                }
+                if FORMAT_KINDS.iter().any(|k| is_format_decl(s, k)) {
+                    return Err(PipelineError::Lex(LexErrorAt {
+                        error: LexError::FormatKind,
+                        line: self.cur_line,
+                    }));
+                }
                 // `.!types` imports and `.!registry` Layer 1 overrides
                 // configure resolution; all declarations pass through
                 // into canonical output (resolution metadata).
@@ -1203,7 +1234,7 @@ mod tests {
         let d = build(".!kaiv 1\n@.tags;=a;b\n@.tags+=c\n/@labels;=$@.tags\n");
         assert_eq!(
             d,
-            ".!kaiv 1\n!str'/@labels::0=a\n!str'/@labels::1=b\n!str'/@labels::2=c\n"
+            ".!daiv\n!str'/@labels::0=a\n!str'/@labels::1=b\n!str'/@labels::2=c\n"
         );
         assert!(!d.contains("/@.tags"), "hidden name leaked: {d}");
     }

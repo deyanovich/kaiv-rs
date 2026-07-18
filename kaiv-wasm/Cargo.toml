@@ -3,7 +3,7 @@ name = "kaiv-wasm"
 description = "Browser playground entry point for the kaiv toolchain"
 # Mirrors the kaiv core version it wraps; surfaced in the
 # playground footer via version().
-version = "0.5.0"
+version = "0.6.0"
 publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"

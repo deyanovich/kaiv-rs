@@ -1447,7 +1447,7 @@ pub fn import_schema(input: &[u8], name: &str) -> Result<String, PipelineError> 
         imports: std::collections::BTreeSet::new(),
     };
     ctx.record_fields(&fields, "", 0)?;
-    let mut out = format!(".!kaivschema 1 {name}\n");
+    let mut out = format!(".!saiv 1 {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -1902,7 +1902,7 @@ mod tests {
             {"name":"blob","type":["null",{"type":"array","items":"string"}]}
         ]}"#;
         let saiv = import_schema(avsc, "acme/event").unwrap();
-        assert!(saiv.starts_with(".!kaivschema 1 acme/event\n"));
+        assert!(saiv.starts_with(".!saiv 1 acme/event\n"));
         assert!(saiv.contains("!int[-9223372036854775808,9223372036854775807]\nid=\n"));
         assert!(saiv.contains("!int[-2147483648,2147483647]\nseq=\n"));
         assert!(saiv.contains("host=\n"));

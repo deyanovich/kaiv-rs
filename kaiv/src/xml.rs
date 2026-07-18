@@ -699,8 +699,8 @@ mod tests {
     fn multiline_attribute_survives_via_char_refs() {
         let src = "<a note=\"l1&#10;l2\"/>";
         let out = import(src.as_bytes()).unwrap();
-        // The embedded newline forces the &json channel.
-        assert!(out.contains("&json\n"));
+        // The embedded newline now travels readable as core !text.
+        assert!(out.contains("!text\n/a::\"@note\"=l1|:|l2\n"));
         let back = roundtrip(src);
         assert!(back.contains("note=\"l1&#10;l2\""));
     }

@@ -47,6 +47,16 @@ pub struct SchemaField {
 }
 
 pub fn parse_csaiv(text: &str) -> Result<CompiledSchema, PipelineError> {
+    // Canonical-kind gate: a compiled schema opens with `.!csaiv`
+    // (SPEC.md § Format Declaration).
+    crate::lexer::expect_kind(text, "csaiv").map_err(PipelineError::Lex)?;
+    parse_csaiv_inner(text)
+}
+
+/// The header-agnostic parse behind [`parse_csaiv`]: used directly on
+/// internally-composed schema text (qualified `.!schema` composition
+/// strips the source headers, so the composite carries none).
+fn parse_csaiv_inner(text: &str) -> Result<CompiledSchema, PipelineError> {
     let mut strict = false;
     let mut provenance = None;
     let mut fields = Vec::new();
@@ -57,7 +67,7 @@ pub fn parse_csaiv(text: &str) -> Result<CompiledSchema, PipelineError> {
             continue;
         }
         if s.starts_with(".!") || s.starts_with(".?") {
-            if s.starts_with(".!kaivschema") && s.split([' ', '\t']).any(|t| t == "strict") {
+            if s.starts_with(".!csaiv") && s.split([' ', '\t']).any(|t| t == "strict") {
                 strict = true;
             }
             if let Some(level) = s.strip_prefix(".!provenance:") {
@@ -279,7 +289,7 @@ pub fn schema_for_daiv(
     }
     let mut text = out.join("\n");
     text.push('\n');
-    parse_csaiv(&text).map(Some)
+    parse_csaiv_inner(&text).map(Some)
 }
 
 struct DataLine {
@@ -361,6 +371,15 @@ fn field_ctx(error: AppError, f: &SchemaField, d: &DataLine) -> AppErrorAt {
 }
 
 pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
+    // Canonical-kind gate: the Validator consumes `.daiv` only
+    // (SPEC.md § Format Declaration).
+    if let Err(e) = crate::lexer::expect_kind(daiv, "daiv") {
+        return Err(at(
+            AppError::FormatKind,
+            e.line,
+            "stream does not open with the .!daiv declaration".into(),
+        ));
+    }
     let data = match parse_daiv(daiv) {
         Ok(d) => d,
         Err(e) => {
@@ -832,6 +851,16 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
                 // span) governs the value (SPEC.md § Tagged unions).
                 let matched: Option<&[Constraint]> = if a.type_name == d.type_name {
                     Some(&a.constraints)
+                } else if a.type_name == "text" && d.type_name == "str" {
+                    // str→text coercion (SPEC.md § The text Type): a
+                    // plain string satisfies a text field iff the
+                    // coercion is meaning-preserving — a literal
+                    // `|:|` in the value would be silently
+                    // reinterpreted as line breaks, so it collides.
+                    if d.value.contains("|:|") {
+                        return Err(AppError::DelimiterCollision);
+                    }
+                    Some(&a.constraints)
                 } else {
                     a.union
                         .iter()
@@ -1022,8 +1051,8 @@ mod tests {
     #[test]
     fn validation_errors_carry_site_context() {
         let schema =
-            parse_csaiv(".!kaivschema 1 a/x\n!int[1,65535]'/server::port=\n").unwrap();
-        let err = validate(".!kaiv 1\n!int'/server::port=99999\n", &schema).unwrap_err();
+            parse_csaiv(".!csaiv 1 a/x\n!int[1,65535]'/server::port=\n").unwrap();
+        let err = validate(".!daiv\n!int'/server::port=99999\n", &schema).unwrap_err();
         assert_eq!(err.error, AppError::ConstraintViolation);
         assert_eq!(err.line, 2);
         assert_eq!(
@@ -1037,7 +1066,7 @@ mod tests {
         );
 
         // A missing declared field names the field, without a line.
-        let err = validate(".!kaiv 1\n", &schema).unwrap_err();
+        let err = validate(".!daiv\n", &schema).unwrap_err();
         assert_eq!(err.error, AppError::RequiredFieldSchema);
         assert_eq!(err.line, 0);
         assert_eq!(
@@ -1051,49 +1080,49 @@ mod tests {
         // The grammar anchors every entry to its source id, so a
         // timestamp-only level cannot exist — `timestamp` was exactly
         // `required` and is no longer a recognized level.
-        assert!(parse_csaiv(".!kaivschema 1 a/x\n.!provenance:timestamp\n!str'::a=\n").is_err());
-        assert!(parse_csaiv(".!kaivschema 1 a/x\n.!provenance:required\n!str'::a=\n").is_ok());
+        assert!(parse_csaiv(".!csaiv 1 a/x\n.!provenance:timestamp\n!str'::a=\n").is_err());
+        assert!(parse_csaiv(".!csaiv 1 a/x\n.!provenance:required\n!str'::a=\n").is_ok());
     }
 
     #[test]
     fn provenance_required_on_every_element_line() {
         let schema = parse_csaiv(
-            ".!kaivschema 1 a/x\n.!provenance:required\n!str'/@servers/::host=\n!str'/@servers/::port=\n",
+            ".!csaiv 1 a/x\n.!provenance:required\n!str'/@servers/::host=\n!str'/@servers/::port=\n",
         )
         .unwrap();
         // The port element line carries no provenance — must fail even
         // though it is not the first line of the run.
         let bad =
-            ".!kaiv 1\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str'/@servers/0::port=1\n";
+            ".!daiv\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str'/@servers/0::port=1\n";
         assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ProvenanceSchema));
         // Fully-provenanced element validates.
-        let ok = ".!kaiv 1\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str?s1@20250101T000000Z'/@servers/0::port=1\n";
+        let ok = ".!daiv\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str?s1@20250101T000000Z'/@servers/0::port=1\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
     fn duplicate_element_field_is_a_duplicate_key() {
         let schema =
-            parse_csaiv(".!kaivschema 1 a/s\n/^-?[0-9]+$/ ..num[1,65535]'/@servers/::port=\n")
+            parse_csaiv(".!csaiv 1 a/s\n/^-?[0-9]+$/ ..num[1,65535]'/@servers/::port=\n")
                 .unwrap();
         // Two ::port lines for element 0 — a repeated schema-defined
         // element key; the out-of-range second value must not slip
         // through unchecked.
-        let dup = ".!kaiv 1\n!str'/@servers/0::port=80\n!str'/@servers/0::port=999999\n";
+        let dup = ".!daiv\n!str'/@servers/0::port=80\n!str'/@servers/0::port=999999\n";
         assert_eq!(validate(dup, &schema).map_err(|e| e.error), Err(AppError::DuplicateKeySchema));
     }
 
     #[test]
     fn quoted_map_key_with_slash_is_matched() {
         let schema = parse_csaiv(
-            ".!kaivschema 1 acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
+            ".!csaiv 1 acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
         )
         .unwrap();
         // A quoted key literally named `a/b` is a flat map entry, not
         // deeper structure — it matches and its value is checked.
-        let ok = ".!kaiv 1\n!str'::host=a\n!str'/settings::\"a/b\"=1\n";
+        let ok = ".!daiv\n!str'::host=a\n!str'/settings::\"a/b\"=1\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
-        let bad = ".!kaiv 1\n!str'::host=a\n!str'/settings::\"a/b\"=oops\n";
+        let bad = ".!daiv\n!str'::host=a\n!str'/settings::\"a/b\"=oops\n";
         assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
     }
 
@@ -1108,7 +1137,7 @@ mod tests {
     }
 
     const SERVER_CSAIV: &str = concat!(
-        ".!kaivschema 1 hub/server strict\n",
+        ".!csaiv 1 hub/server strict\n",
         "!str'::host=\n",
         "/^-?[0-9]+$/ ..num [1,65535]'::port=8080\n",
     );
@@ -1116,7 +1145,7 @@ mod tests {
     #[test]
     fn schema_for_daiv_none_without_declaration() {
         let r = dead_end();
-        assert!(schema_for_daiv(".!kaiv 1\n!str'::a=x\n", &r)
+        assert!(schema_for_daiv(".!daiv\n!str'::a=x\n", &r)
             .unwrap()
             .is_none());
     }
@@ -1125,12 +1154,12 @@ mod tests {
     fn schema_for_daiv_flat_reference() {
         let r = dead_end();
         r.preload("hub/server", "csaiv", SERVER_CSAIV.into());
-        let daiv = ".!kaiv 1\n.!schema:hub/server\n!str'::host=a\n!int'::port=80\n";
+        let daiv = ".!daiv\n.!schema:hub/server\n!str'::host=a\n!int'::port=80\n";
         let s = schema_for_daiv(daiv, &r).unwrap().unwrap();
         assert!(s.strict); // the flat reference's header governs
         assert_eq!(s.fields.len(), 2);
         assert!(validate(daiv, &s).is_ok());
-        assert!(validate(".!kaiv 1\n!str'::host=a\n!int'::port=99999\n", &s).is_err());
+        assert!(validate(".!daiv\n!str'::host=a\n!int'::port=99999\n", &s).is_err());
     }
 
     #[test]
@@ -1138,7 +1167,7 @@ mod tests {
         let r = dead_end();
         r.preload("hub/server", "csaiv", SERVER_CSAIV.into());
         let daiv = concat!(
-            ".!kaiv 1\n",
+            ".!daiv\n",
             ".!schema:/upstream hub/server\n",
             ".!schema:/downstream hub/server\n",
             "!str'/upstream::host=a\n!int'/upstream::port=80\n",
@@ -1155,7 +1184,7 @@ mod tests {
     #[test]
     fn schema_for_daiv_unresolved_is_recorded() {
         let r = dead_end();
-        let daiv = ".!kaiv 1\n.!schema:acme/missing\n!str'::a=x\n";
+        let daiv = ".!daiv\n.!schema:acme/missing\n!str'::a=x\n";
         assert!(schema_for_daiv(daiv, &r).is_err());
         assert_eq!(
             r.take_missing(),
@@ -1166,7 +1195,7 @@ mod tests {
     #[test]
     fn schema_for_daiv_url_reference_rejected() {
         let r = dead_end();
-        let daiv = ".!kaiv 1\n.!schema https://example.org/x.csaiv\n";
+        let daiv = ".!daiv\n.!schema https://example.org/x.csaiv\n";
         assert!(matches!(
             schema_for_daiv(daiv, &r),
             Err(PipelineError::App(AppError::SchemaResolution))
@@ -1188,9 +1217,9 @@ mod tests {
     #[cfg(not(any(feature = "collation-icu", feature = "collation-colligo")))]
     #[test]
     fn locale_collation_is_rejected() {
-        let s = parse_csaiv(".!kaivschema 1 a/c\n!str ..lex[en]'::n=\n").unwrap();
+        let s = parse_csaiv(".!csaiv 1 a/c\n!str ..lex[en]'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=x\n", &s).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=x\n", &s).map_err(|e| e.error),
             Err(AppError::CollationUnsupported)
         );
     }
@@ -1200,15 +1229,15 @@ mod tests {
     fn locale_collation_ranges() {
         // Byte order puts "étude" (0xC3…) past "f", outside [e,f];
         // French collation keeps é with e, inside it.
-        let s = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex[fr]'::n=\n").unwrap();
-        assert!(validate(".!kaiv 1\n!str'::n=étude\n", &s).is_ok());
+        let s = parse_csaiv(".!csaiv 1 a/c\n!str [e,f] ..lex[fr]'::n=\n").unwrap();
+        assert!(validate(".!daiv\n!str'::n=étude\n", &s).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=granite\n", &s).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=granite\n", &s).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
-        let bare = parse_csaiv(".!kaivschema 1 a/c\n!str [e,f] ..lex'::n=\n").unwrap();
+        let bare = parse_csaiv(".!csaiv 1 a/c\n!str [e,f] ..lex'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=étude\n", &bare).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=étude\n", &bare).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
     }
@@ -1219,10 +1248,10 @@ mod tests {
         // Collation governs equality: the NFD spelling of "résumé"
         // is a member of the NFC-spelled enum under fr, and a plain
         // "resume" is not (tertiary default — accents distinguish).
-        let s = parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[fr]'::n=\n").unwrap();
-        assert!(validate(".!kaiv 1\n!str'::n=re\u{301}sume\u{301}\n", &s).is_ok());
+        let s = parse_csaiv(".!csaiv 1 a/c\n!str {résumé} ..lex[fr]'::n=\n").unwrap();
+        assert!(validate(".!daiv\n!str'::n=re\u{301}sume\u{301}\n", &s).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=resume\n", &s).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=resume\n", &s).map_err(|e| e.error),
             Err(AppError::ConstraintViolation)
         );
         // Strength overrides (`-u-ks-…`) split the backends: ICU4X
@@ -1230,12 +1259,12 @@ mod tests {
         // rejects the tag rather than silently collating at the
         // wrong strength.
         let s2 =
-            parse_csaiv(".!kaivschema 1 a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
+            parse_csaiv(".!csaiv 1 a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
         #[cfg(feature = "collation-icu")]
-        assert!(validate(".!kaiv 1\n!str'::n=resume\n", &s2).is_ok());
+        assert!(validate(".!daiv\n!str'::n=resume\n", &s2).is_ok());
         #[cfg(all(feature = "collation-colligo", not(feature = "collation-icu")))]
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=resume\n", &s2).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=resume\n", &s2).map_err(|e| e.error),
             Err(AppError::CollationUnsupported)
         );
     }
@@ -1245,9 +1274,9 @@ mod tests {
     fn unresolvable_locale_tag_is_rejected() {
         // Malformed tag — and rejected up front, before any
         // comparison is attempted (the field carries no constraint).
-        let s = parse_csaiv(".!kaivschema 1 a/c\n!str ..lex[123]'::n=\n").unwrap();
+        let s = parse_csaiv(".!csaiv 1 a/c\n!str ..lex[123]'::n=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::n=x\n", &s).map_err(|e| e.error),
+            validate(".!daiv\n!str'::n=x\n", &s).map_err(|e| e.error),
             Err(AppError::CollationUnsupported)
         );
     }
@@ -1255,15 +1284,15 @@ mod tests {
     #[test]
     fn unit_mismatch_both_directions() {
         // Field carries a unit, data does not — and the reverse.
-        let with = parse_csaiv(".!kaivschema 1 a/u\n!float:km'::d=\n").unwrap();
-        assert!(validate(".!kaiv 1\n!float:km'::d=5\n", &with).is_ok());
+        let with = parse_csaiv(".!csaiv 1 a/u\n!float:km'::d=\n").unwrap();
+        assert!(validate(".!daiv\n!float:km'::d=5\n", &with).is_ok());
         assert_eq!(
-            validate(".!kaiv 1\n!float'::d=5\n", &with).map_err(|e| e.error),
+            validate(".!daiv\n!float'::d=5\n", &with).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
         );
-        let without = parse_csaiv(".!kaivschema 1 a/u\n!float'::d=\n").unwrap();
+        let without = parse_csaiv(".!csaiv 1 a/u\n!float'::d=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!float:km'::d=5\n", &without).map_err(|e| e.error),
+            validate(".!daiv\n!float:km'::d=5\n", &without).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
         );
     }
@@ -1293,25 +1322,25 @@ mod tests {
         // Relaxed schemas MAY contain undefined fields anywhere —
         // they must not consume the schema pointer (SPEC.md § Errors,
         // strict-vs-relaxed).
-        let schema = parse_csaiv(".!kaivschema 1 acme/m\n!str'::a=\n!str'::b=\n").unwrap();
-        let doc = ".!kaiv 1\n!str'::zzz=1\n!str'::a=x\n!str'::mid=2\n!str'::b=y\n!str'::tail=3\n";
+        let schema = parse_csaiv(".!csaiv 1 acme/m\n!str'::a=\n!str'::b=\n").unwrap();
+        let doc = ".!daiv\n!str'::zzz=1\n!str'::a=x\n!str'::mid=2\n!str'::b=y\n!str'::tail=3\n";
         assert_eq!(validate(doc, &schema).map_err(|e| e.error), Ok(()));
-        let strict = parse_csaiv(".!kaivschema 1 acme/m strict\n!str'::a=\n!str'::b=\n").unwrap();
+        let strict = parse_csaiv(".!csaiv 1 acme/m strict\n!str'::a=\n!str'::b=\n").unwrap();
         assert_eq!(
             validate(doc, &strict).map_err(|e| e.error),
             Err(AppError::UndefinedFieldStrictSchema)
         );
         // Ordering of DEFINED fields is still enforced.
-        let ooo = ".!kaiv 1\n!str'::b=y\n!str'::a=x\n";
+        let ooo = ".!daiv\n!str'::b=y\n!str'::a=x\n";
         assert_eq!(validate(ooo, &schema).map_err(|e| e.error), Err(AppError::RequiredFieldSchema));
     }
 
     #[test]
     fn quoted_names_with_operators_inside() {
         // parse_daiv splits quote-aware: a name may contain `=`.
-        let schema = parse_csaiv(".!kaivschema 1 acme/m\n!str'::\"a=b\"=\n").unwrap();
+        let schema = parse_csaiv(".!csaiv 1 acme/m\n!str'::\"a=b\"=\n").unwrap();
         assert_eq!(
-            validate(".!kaiv 1\n!str'::\"a=b\"=equals\n", &schema).map_err(|e| e.error),
+            validate(".!daiv\n!str'::\"a=b\"=equals\n", &schema).map_err(|e| e.error),
             Ok(())
         );
     }
@@ -1319,14 +1348,14 @@ mod tests {
     #[test]
     fn pass2_table_constraints() {
         let schema = parse_csaiv(concat!(
-            ".!kaivschema 1 acme/fleet\n",
+            ".!csaiv 1 acme/fleet\n",
             "/@servers [unique::host,port] [min=1] [max=3]\n",
             "!str'/@servers/::host=\n",
             "!str'/@servers/::port=\n",
         ))
         .unwrap();
         let doc = |els: &[(&str, &str)]| {
-            let mut s = String::from(".!kaiv 1\n");
+            let mut s = String::from(".!daiv\n");
             for (i, (h, p)) in els.iter().enumerate() {
                 s.push_str(&format!(
                     "!str'/@servers/{i}::host={h}\n!str'/@servers/{i}::port={p}\n"
@@ -1344,7 +1373,7 @@ mod tests {
         assert_eq!(validate(&doc(&[("a", "bc"), ("ab", "c")]), &schema), Ok(()));
         // Cardinality bounds.
         assert_eq!(
-            validate(".!kaiv 1\n", &schema).map_err(|e| e.error),
+            validate(".!daiv\n", &schema).map_err(|e| e.error),
             Err(AppError::CardinalityViolation)
         );
         assert_eq!(
@@ -1360,7 +1389,7 @@ mod tests {
     #[test]
     fn pass2_foreign_keys() {
         let schema = parse_csaiv(concat!(
-            ".!kaivschema 1 acme/org\n",
+            ".!csaiv 1 acme/org\n",
             "/@departments [unique::name]\n",
             "!str'/@departments/::name=\n",
             "/@employees [ref::department=/@departments/*::name]\n",
@@ -1369,14 +1398,14 @@ mod tests {
         ))
         .unwrap();
         let ok = concat!(
-            ".!kaiv 1\n",
+            ".!daiv\n",
             "!str'/@departments/0::name=eng\n",
             "!str'/@employees/0::name=ada\n",
             "!str'/@employees/0::department=eng\n",
         );
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         let dangling = concat!(
-            ".!kaiv 1\n",
+            ".!daiv\n",
             "!str'/@departments/0::name=eng\n",
             "!str'/@employees/0::name=ada\n",
             "!str'/@employees/0::department=ops\n",
@@ -1386,25 +1415,25 @@ mod tests {
             Err(AppError::ReferentialIntegrity)
         );
         // Empty collections are valid absent an explicit [min=N].
-        assert_eq!(validate(".!kaiv 1\n", &schema).map_err(|e| e.error), Ok(()));
+        assert_eq!(validate(".!daiv\n", &schema).map_err(|e| e.error), Ok(()));
     }
 
     #[test]
     fn map_entry_scan() {
         let schema = parse_csaiv(
-            ".!kaivschema 1 acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
+            ".!csaiv 1 acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
         )
         .unwrap();
-        let ok = ".!kaiv 1\n!str'::host=a\n!str'/settings::x=1\n!str'/settings::y=2\n";
+        let ok = ".!daiv\n!str'::host=a\n!str'/settings::x=1\n!str'/settings::y=2\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         // Zero entries is a valid map.
-        let empty = ".!kaiv 1\n!str'::host=a\n";
+        let empty = ".!daiv\n!str'::host=a\n";
         assert_eq!(validate(empty, &schema).map_err(|e| e.error), Ok(()));
         // Entry value must satisfy the value-type constraint.
-        let bad = ".!kaiv 1\n!str'::host=a\n!str'/settings::x=oops\n";
+        let bad = ".!daiv\n!str'::host=a\n!str'/settings::x=oops\n";
         assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
         // Strict: a non-entry under an unrelated path is still undefined.
-        let undef = ".!kaiv 1\n!str'::host=a\n!str'/other::x=1\n";
+        let undef = ".!daiv\n!str'::host=a\n!str'/other::x=1\n";
         assert_eq!(
             validate(undef, &schema).map_err(|e| e.error),
             Err(AppError::UndefinedFieldStrictSchema)

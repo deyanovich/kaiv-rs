@@ -1,4 +1,4 @@
-.!kaivtype 1 std/time
+.!taiv 1 std/time
 
 // Time library: RFC 3339 shapes with chronological (..time) span
 // ordering. The four types mirror the four TOML datetime flavors.

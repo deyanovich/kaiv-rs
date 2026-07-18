@@ -22,11 +22,20 @@ use std::collections::{HashMap, HashSet};
 /// declare a schema need [`denormalize_with`] for the materialization
 /// pass.
 pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
+    // The Denormalizer consumes canonical `.raiv` only: the stream
+    // must open with `.!raiv`, which is rewritten to `.!daiv` in the
+    // output (SPEC.md § Format Declaration).
+    crate::lexer::expect_kind(raiv, "raiv").map_err(PipelineError::Lex)?;
     let mut table: HashMap<String, String> = HashMap::new();
     let mut out = String::new();
     for line in raiv.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let eol = &line[body.len()..];
+        if is_format_raiv(body) {
+            out.push_str(".!daiv");
+            out.push_str(eol);
+            continue;
+        }
         // Comments and declarations are not data lines: they neither
         // define references nor undergo `$`-resolution (a `$` inside a
         // comment or `.!`/`.?` header is literal). Pass them through
@@ -52,6 +61,14 @@ pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
     Ok(out)
 }
 
+/// Whether a line body is the `.!raiv` format declaration (bare or
+/// versioned), modulo leading whitespace.
+fn is_format_raiv(body: &str) -> bool {
+    body.trim_start_matches([' ', '\t'])
+        .strip_prefix(".!raiv")
+        .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t']))
+}
+
 /// The full Denormalizer: reference resolution, then — when the data
 /// declares a schema — materialization of absent fields from the
 /// resolved `.csaiv` (SPEC.md § Default Values).
@@ -70,7 +87,7 @@ pub fn denormalize_with(raiv: &str, resolver: &Resolver) -> Result<String, Pipel
 /// a build-time `RequiredFieldSchemaError`. Out-of-order or undefined
 /// data lines pass through untouched — ordering is the Validator's
 /// verdict, not the Denormalizer's to repair.
-fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String, PipelineError> {
+pub(crate) fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String, PipelineError> {
     let lines: Vec<&str> = daiv.split_inclusive('\n').collect();
     // Line namepaths (None for declarations/comments/blank lines).
     let nps: Vec<Option<String>> = lines.iter().map(|l| namepath_of(l)).collect();
@@ -129,7 +146,7 @@ fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String, PipelineEr
             si = gend;
             continue;
         }
-        out.push_str(lines[di]);
+        emit_matched(&fields[si], lines[di], &mut out)?;
         // Map-entry and scalar-array element lines consume a run;
         // the pointer stays until the namepath prefix changes.
         if !crate::validator::is_map_entry(&fields[si])
@@ -205,8 +222,10 @@ fn materialize_ns_array(
                     emit_absent_element(g, &elem_fields, arr, idx, eol, out)?;
                 }
                 gj = gk + 1;
+                emit_matched(&group[gk], lines[k], out)?;
+            } else {
+                out.push_str(lines[k]);
             }
-            out.push_str(lines[k]);
         }
         for g in &group[gj..] {
             emit_absent_element(g, &elem_fields, arr, idx, eol, out)?;
@@ -214,6 +233,45 @@ fn materialize_ns_array(
         di = dj;
     }
     Ok(di)
+}
+
+/// Emit a schema-matched data line, retyping `!str` to `!text` when
+/// the schema declares text (SPEC.md § The text Type): the schema
+/// type wins in the deployment artifact, so downstream consumers get
+/// the export semantics without re-reading the schema. The coercion
+/// is meaning-preserving only when the value carries no literal
+/// `|:|` — such content would be silently reinterpreted as line
+/// breaks, so it is a `DelimiterCollisionError` instead.
+fn emit_matched(f: &SchemaField, line: &str, out: &mut String) -> Result<(), PipelineError> {
+    if field_wants_text(f) {
+        let body = line.trim_start_matches([' ', '\t']);
+        if let Some(rest) = body.strip_prefix("!str") {
+            if rest.starts_with(['\'', '?']) {
+                if let Some(eq) = rest.find('\'').and_then(|t| {
+                    crate::validator::first_eq(&rest[t + 1..]).map(|e| t + 1 + e)
+                }) {
+                    if rest[eq + 1..].trim_end_matches(['\n', '\r']).contains("|:|") {
+                        return Err(PipelineError::App(AppError::DelimiterCollision));
+                    }
+                }
+                out.push_str(&line[..line.len() - body.len()]);
+                out.push_str("!text");
+                out.push_str(rest);
+                return Ok(());
+            }
+        }
+    }
+    out.push_str(line);
+    Ok(())
+}
+
+/// Does the compiled field declare the `text` type (a retained
+/// non-union `!text` item)?
+fn field_wants_text(f: &SchemaField) -> bool {
+    f.items.iter().any(|i| match i {
+        crate::anno::Item::Anno(a) => a.type_name == "text" && a.union.is_empty(),
+        _ => false,
+    })
 }
 
 /// Materialize one group field absent from an element (skipping
@@ -448,10 +506,33 @@ mod tests {
         // The port line is commented out, so `$port` has no definition
         // and must fail rather than silently resolve to the disabled
         // value.
-        let r = denormalize("#!int'::port=8080\n!int'::port_backup=$port\n");
+        let r = denormalize(".!raiv\n#!int'::port=8080\n!int'::port_backup=$port\n");
         assert!(matches!(
             r,
             Err(PipelineError::App(AppError::UndefinedReference))
+        ));
+    }
+
+    #[test]
+    fn schema_text_field_retypes_str_lines() {
+        // The schema type wins in .daiv: a plain (str) line on a
+        // !text-declared field is retyped at materialization, so the
+        // deployment artifact carries the export semantics.
+        let r = Resolver::offline();
+        let csaiv = ".!csaiv 1 acme/notes\n!text'::basho=\n";
+        r.preload("acme/notes", "csaiv", csaiv.as_bytes().to_vec());
+        let raiv = ".!raiv\n.!schema:acme/notes\n!str'::basho=old pond\n";
+        let daiv = denormalize_with(raiv, &r).unwrap();
+        assert!(daiv.contains("!text'::basho=old pond\n"));
+        // Explicit !text passes through untouched.
+        let raiv2 = ".!raiv\n.!schema:acme/notes\n!text'::basho=a|:|b\n";
+        assert!(denormalize_with(raiv2, &r).unwrap().contains("!text'::basho=a|:|b\n"));
+        // A str value carrying a literal `|:|` cannot be coerced —
+        // the retype would reinterpret it as line breaks.
+        let raiv3 = ".!raiv\n.!schema:acme/notes\n!str'::basho=a|:|b\n";
+        assert!(matches!(
+            denormalize_with(raiv3, &r),
+            Err(PipelineError::App(AppError::DelimiterCollision))
         ));
     }
 
@@ -460,7 +541,7 @@ mod tests {
         // A prose comment carrying an apostrophe, `=`, and `$` is not a
         // data line: it defines no reference, is not `$`-resolved, and
         // passes through verbatim.
-        let out = denormalize("# don't touch: x=$y\n!int'::a=1\n").unwrap();
+        let out = denormalize(".!raiv\n# don't touch: x=$y\n!int'::a=1\n").unwrap();
         assert!(out.contains("# don't touch: x=$y"));
         assert!(out.contains("!int'::a=1"));
     }

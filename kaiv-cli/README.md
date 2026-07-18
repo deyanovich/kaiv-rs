@@ -17,12 +17,18 @@ kaiv build    [file.kaiv]         authored -> .daiv (compile + denorm)
 kaiv schema   [file.saiv]         authored schema -> compiled (.csaiv)
 kaiv validate <data> <schema>     validate data against a schema
 kaiv unit     <expr>              canonicalize a unit expression
+kaiv fmt      [file] [-w|--check] format into the standard style;
+                                  canonical .daiv/.raiv input is
+                                  rendered as authored .kaiv
 kaiv import   [--FORMAT] [file]   foreign format -> authored .kaiv
 kaiv export   --FORMAT [file]     canonical kaiv -> foreign format
 kaiv infer    [--name ID] [file]  infer an authored .saiv from data
 kaiv import-schema [--name] [f]   foreign schema -> authored .saiv
                                   (JSON Schema, .proto, .avsc,
                                   GraphQL SDL, .xsd)
+kaiv login    [email]             sign in to the kaiv registries
+kaiv whoami                       the signed-in account
+kaiv logout                       revoke and forget the session
 ```
 
 Formats: `--json` `--yaml` `--toml` `--xml` `--cbor` `--avro`
@@ -38,15 +44,34 @@ stdin when no file is given. `validate` accepts authored or
 foreign-format data and authored or compiled schemas, converting
 as needed.
 
+`fmt` is the standard formatter for what humans write: it picks,
+per group of fields, the most readable of the three equivalent
+syntaxes (flat namepath line, inline `:=`/`+:=` assignment within
+72 columns, `(...)`/`[...]` block), honoring authored blank lines
+as grouping hints and never touching semantics — values, order,
+comments, and variables are preserved exactly. `-w` rewrites the
+file in place; `--check` exits nonzero when a file is not already
+formatted (for CI). Given a canonical `.daiv`/`.raiv`, `fmt`
+prints the idiomatic authored form instead — the readable view of
+a machine artifact (compiled-away sugar does not come back).
+
 Type, schema, and unit resolution is configured by the nearest
 `kaiv.kaiv` (itself a kaiv file) found from the working directory
 upward, plus `KAIV_REGISTRY_*` environment overrides.
+
+`login` is passwordless: an emailed one-time link approves the
+device (compare the code the CLI prints against the one in the
+mail), and the first sign-in creates the account. The stored
+credential is a rotating refresh token at
+`~/.config/kaiv/credentials` (mode 0600); access tokens are
+minted on demand. `KAIV_ID_URL` overrides the identity host
+(default `https://id.kaiv.io` during the alpha).
 
 ## Example
 
 ```
 $ echo '{"host":"a.example","port":8443}' | kaiv import --json
-.!kaiv 1
+.!kaiv
 
 host=a.example
 !int

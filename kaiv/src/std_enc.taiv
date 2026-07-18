@@ -1,4 +1,4 @@
-.!kaivtype 1 std/enc
+.!taiv 1 std/enc
 
 // Encoding library: base64url-embedded content, the decoded payload
 // typed by name. Every type derives from b64; the type name states
@@ -9,9 +9,11 @@
 !b64
 &bin=
 
-// Multi-line UTF-8 text
+// Multi-line UTF-8 text, base64url-embedded (readable multi-line
+// text belongs in the core !text type; &plain is the fallback for
+// content the |:| separator cannot carry)
 !b64
-&txt=
+&plain=
 
 // JSON document
 !b64

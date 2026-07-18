@@ -14,6 +14,10 @@ pub enum FileKind {
     TypeLib,
     /// `.faiv` unit-definition libraries.
     UnitLib,
+    /// `.maiv` mapping files: rule 6 never applies (no metadata
+    /// annotations, SPEC.md § Mapping Lines), and the `/*` wildcard
+    /// is a valid namepath segment on the target side.
+    Mapping,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,11 +59,14 @@ pub struct Line<'a> {
 
 const DECL_KEYWORDS: &[&str] = &[
     "kaiv",
-    "kaivschema",
-    "kaivtype",
-    "kaivunit",
-    "kaivmap",
-    "kaivmetaschema",
+    "raiv",
+    "daiv",
+    "saiv",
+    "csaiv",
+    "taiv",
+    "faiv",
+    "maiv",
+    "msaiv",
     "schema",
     "types",
     "units",
@@ -138,6 +145,36 @@ pub fn lex(input: &[u8], kind: FileKind) -> Result<Vec<Line<'_>>, LexErrorAt> {
         out.push(Line { no, kind: k });
     }
     Ok(out)
+}
+
+/// Canonical-kind gate (SPEC.md § Format Declaration): a stream
+/// consumed as a canonical kind must open with the matching format
+/// declaration — on the first line, or the line after an optional
+/// shebang. Only authored `.kaiv` may omit the declaration, so
+/// canonical consumers (Denormalizer for `.raiv`, Validator for
+/// `.daiv`/`.csaiv`) call this before processing.
+pub fn expect_kind(text: &str, kind: &str) -> Result<(), LexErrorAt> {
+    let mut lines = text.split('\n');
+    let mut first = lines.next().unwrap_or("");
+    let mut no = 1;
+    if first.starts_with("#!") {
+        first = lines.next().unwrap_or("");
+        no = 2;
+    }
+    let body = first.strip_suffix('\r').unwrap_or(first);
+    let ok = body
+        .trim_start_matches([' ', '\t'])
+        .strip_prefix(".!")
+        .and_then(|r| r.strip_prefix(kind))
+        .is_some_and(|r| r.is_empty() || r.starts_with([' ', '\t']));
+    if ok {
+        Ok(())
+    } else {
+        Err(LexErrorAt {
+            error: LexError::FormatKind,
+            line: no,
+        })
+    }
 }
 
 fn classify<'a>(
@@ -270,6 +307,9 @@ fn classify<'a>(
         FileKind::Schema | FileKind::TypeLib => {
             matches!(first, '!' | '?' | '&' | '/' | '{' | '.' | '[')
         }
+        // Rule 6 never applies in `.maiv` (SPEC.md § Mapping Lines):
+        // a metadata-looking line is a missing-operator error.
+        FileKind::Mapping => false,
     };
     if !meta_ok {
         return Err(LexErrorAt {
@@ -364,6 +404,7 @@ fn early_meta(s: &str, kind: FileKind) -> bool {
             (first.is_ascii_alphanumeric() || first == '$')
                 && crate::faiv::parse_def_line(s).is_some()
         }
+        FileKind::Mapping => false,
     }
 }
 
@@ -433,10 +474,19 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
     }
     if matches!(
         word.as_str(),
-        "kaiv" | "kaivschema" | "kaivtype" | "kaivunit" | "kaivmap" | "kaivmetaschema"
+        "kaiv" | "raiv" | "daiv" | "saiv" | "csaiv" | "taiv" | "faiv" | "maiv" | "msaiv"
     ) {
+        // The data kinds — and `.!maiv`, which carries no identity
+        // token since a mapping's identity is its `.!source`/`.!target`
+        // endpoint pair (SPEC.md § Mappings) — admit a bare
+        // (versionless) declaration meaning version 1; the
+        // identity-carrying kinds require the version.
+        let data_kind = matches!(word.as_str(), "kaiv" | "raiv" | "daiv" | "maiv");
         let rest = body[word.len()..].trim_start_matches([' ', '\t']);
         let version: &str = rest.split([' ', '\t']).next().unwrap_or("");
+        if version.is_empty() && data_kind {
+            return Ok(());
+        }
         let major = check_version(version).ok_or(LexErrorAt {
             error: LexError::InvalidVersion,
             line: no,
@@ -448,9 +498,10 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
                 line: no,
             });
         }
-        // `.!kaiv` admits nothing after the version (SPEC.md § 10.3
-        // format-decl); the other keywords carry a mandatory operand.
-        if word == "kaiv" && !rest[version.len()..].trim_matches([' ', '\t']).is_empty() {
+        // `.!kaiv`/`.!raiv`/`.!daiv`/`.!maiv` admit nothing after the version
+        // (SPEC.md § 10.3 format-decl); the other keywords carry a
+        // mandatory operand.
+        if data_kind && !rest[version.len()..].trim_matches([' ', '\t']).is_empty() {
             return Err(LexErrorAt {
                 error: LexError::InvalidVersion,
                 line: no,
@@ -536,7 +587,7 @@ pub(crate) fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), Lex
     // `+:=` leave their prefix on the left; schema files add `?=`,
     // type libraries define `&name=`).
     let named_def = key.starts_with('&');
-    if kind != FileKind::Data {
+    if matches!(kind, FileKind::Schema | FileKind::TypeLib | FileKind::UnitLib) {
         key = key.strip_suffix('?').unwrap_or(key);
         if matches!(kind, FileKind::TypeLib | FileKind::UnitLib) {
             key = key.strip_prefix('&').unwrap_or(key);
@@ -615,6 +666,11 @@ pub(crate) fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), Lex
                 continue;
             }
             return Err(err());
+        }
+        // The `/*` wildcard segment (every element index) is part of
+        // the mapping namepath grammar (SPEC.md § Mapping Lines).
+        if kind == FileKind::Mapping && s == "*" {
+            continue;
         }
         if !valid_segment(s) {
             return Err(err());
@@ -774,8 +830,9 @@ mod tests {
     #[test]
     fn all_inventory_keywords_accepted() {
         for l in [
-            ".!kaivmap 1 acme/m",
-            ".!kaivmetaschema 1 corp/c",
+            ".!maiv",
+            ".!maiv 1",
+            ".!msaiv 1 corp/c",
             ".!source hub/s",
             ".!target hub/t",
             ".!via acme/m",
@@ -789,6 +846,12 @@ mod tests {
         assert_eq!(
             one(FileKind::Data, ".!bogus x"),
             Err(LexError::InvalidDirective)
+        );
+        // `.!maiv` carries no identity token — anything after the
+        // version is an error (SPEC.md § Mappings).
+        assert_eq!(
+            one(FileKind::Data, ".!maiv 1 acme/m"),
+            Err(LexError::InvalidVersion)
         );
     }
 

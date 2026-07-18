@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
 pub struct UnitLib {
-    /// Library path from `.!kaivunit` (e.g. `astro/units`).
+    /// Library path from `.!faiv` (e.g. `astro/units`).
     pub library: String,
     pub units: BTreeMap<String, UnitDef>,
 }
@@ -112,8 +112,8 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
         match &line.kind {
             LineKind::Blank | LineKind::Comment(_) | LineKind::Doc(_) => {}
             LineKind::Decl(s) => {
-                // `.!kaivunit VERSION LIBRARY-ID`
-                if let Some(rest) = s.strip_prefix(".!kaivunit") {
+                // `.!faiv VERSION LIBRARY-ID`
+                if let Some(rest) = s.strip_prefix(".!faiv") {
                     let mut toks = rest.split_ascii_whitespace();
                     let _version = toks.next();
                     if let Some(lib) = toks.next() {
@@ -200,7 +200,7 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
     }
     if library.is_empty() {
         return Err(PipelineError::Other(
-            "missing .!kaivunit declaration in .faiv".into(),
+            "missing .!faiv declaration in .faiv".into(),
         ));
     }
     Ok(UnitLib { library, units })
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn parse_library() {
-        let src = b".!kaivunit 1 astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&ua=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
+        let src = b".!faiv 1 astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&ua=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
         let lib = parse_faiv(src).unwrap();
         assert_eq!(lib.library, "astro/units");
         let au = &lib.units["au"];
@@ -236,11 +236,11 @@ mod tests {
     #[test]
     fn invalid_unit_names_and_orphan_lines_rejected() {
         // Underscore name is not 1*ALPHA.
-        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1.0\n&light_second=\n").is_err());
+        assert!(parse_faiv(b".!faiv 1 x/u\nm 1.0\n&light_second=\n").is_err());
         // Dimension line above an alias defines nothing.
-        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1000\n&km=\nm 1609.344\n&mile=km\n").is_err());
+        assert!(parse_faiv(b".!faiv 1 x/u\nm 1000\n&km=\nm 1609.344\n&mile=km\n").is_err());
         // Trailing dimension line with no &name=.
-        assert!(parse_faiv(b".!kaivunit 1 x/u\nm 1.0\n").is_err());
+        assert!(parse_faiv(b".!faiv 1 x/u\nm 1.0\n").is_err());
     }
 
     #[test]

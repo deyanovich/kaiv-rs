@@ -121,7 +121,7 @@ pub fn import_schema(
         Shape::Complex(ct) => ctx.complex_fields(ct, &root_path, false, &mut Vec::new())?,
         Shape::Scalar(_) => return Err(err("the root element is scalar; nothing to convert")),
     }
-    let mut out = format!(".!kaivschema 1 {name}\n");
+    let mut out = format!(".!saiv 1 {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn core_mapping() {
         let saiv = import_schema(XSD.as_bytes(), None, "acme/config").unwrap();
-        assert!(saiv.starts_with(".!kaivschema 1 acme/config\n"));
+        assert!(saiv.starts_with(".!saiv 1 acme/config\n"));
         assert!(saiv.contains("/config::\"@env\"=\n"));
         assert!(saiv.contains("/config::name=\n"));
         assert!(saiv.contains("!int[-2147483648,2147483647]\n/config::port=\n"));
@@ -946,14 +946,14 @@ mod tests {
         r.preload("acme/config", "csaiv", csaiv.into_bytes());
         // Canonical text is valid `.raiv`; denormalize_with resolves
         // the declared schema and materializes the absent optionals.
-        let raiv = ".!kaiv 1\n.!schema:acme/config\n!str'/config::\"@env\"=prod\n!str'/config::name=api\n!int'/config::port=443\n!str'/config/@tag::0=a\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n!int'/config/limits::rps=5\n";
+        let raiv = ".!raiv\n.!schema:acme/config\n!str'/config::\"@env\"=prod\n!str'/config::name=api\n!int'/config::port=443\n!str'/config/@tag::0=a\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n!int'/config/limits::rps=5\n";
         let daiv = crate::denorm::denormalize_with(raiv, &r).unwrap();
         assert!(daiv.contains("!null'/config::ratio=\n"));
         assert!(daiv.contains("!null'/config/@server/0::weight=\n"));
         assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // Required attribute and occurs cardinality are enforced.
         assert_eq!(
-            crate::validate(".!kaiv 1\n!str'/config::name=api\n!int'/config::port=1\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'/config::name=api\n!int'/config::port=1\n!int'/config/@server/0::\"@id\"=1\n!str'/config/@server/0::host=h\n", &sc).map_err(|e| e.error),
             Err(crate::AppError::RequiredFieldSchema)
         );
         // Fully materialized except the /@server array (min=1):
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(
             crate::validate(
                 concat!(
-                    ".!kaiv 1\n!str'/config::\"@env\"=p\n!str'/config::name=api\n!int'/config::port=1\n",
+                    ".!daiv\n!str'/config::\"@env\"=p\n!str'/config::name=api\n!int'/config::port=1\n",
                     "!null'/config::ratio=\n!null'/config::tier=\n!null'/config::code=\n!null'/config::when=\n",
                     "!null'/config/limits::rps=\n!str'/config/label::\"#text\"=\n!str'/config/label::\"@lang\"=\n"
                 ),

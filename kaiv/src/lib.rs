@@ -42,6 +42,7 @@ pub mod config;
 pub mod denorm;
 pub mod error;
 pub mod faiv;
+pub mod fmt;
 #[cfg(feature = "graphql")]
 pub mod graphql;
 pub mod infer;
@@ -50,6 +51,7 @@ pub mod json;
 #[cfg(feature = "json")]
 pub mod jsonschema;
 pub mod lexer;
+pub mod maiv;
 #[cfg(feature = "net")]
 mod net;
 #[cfg(feature = "proto")]
@@ -70,10 +72,11 @@ pub mod xsd;
 #[cfg(feature = "yaml")]
 pub mod yaml;
 
-pub use builder::{DaivBuilder, Provenance};
+pub use builder::{DaivBuilder, KaivBuilder, Provenance};
 pub use compiler::{compile, compile_with};
 pub use config::Config;
 pub use denorm::{denormalize, denormalize_with};
+pub use fmt::{format_data, format_plain, lift};
 pub use error::{AppError, AppErrorAt, LexError, LexErrorAt, PipelineError};
 pub use lexer::{lex, FileKind};
 pub use resolve::Resolver;

@@ -107,7 +107,7 @@ impl Resolver {
         let bytes = self.read_artifact(lib, layer1, "taiv")?;
         let parsed = parse_taiv(&bytes)?;
         if parsed.library != lib {
-            // The file's .!kaivtype identity must match the requested path.
+            // The file's .!taiv identity must match the requested path.
             return Err(PipelineError::App(AppError::SchemaResolution));
         }
         Ok(parsed)
@@ -124,7 +124,7 @@ impl Resolver {
             let bytes = self.read_artifact(lib, layer1, "faiv")?;
             let parsed = parse_faiv(&bytes)?;
             if parsed.library != lib {
-                // The file's .!kaivunit identity must match the path.
+                // The file's .!faiv identity must match the path.
                 return Err(PipelineError::App(AppError::SchemaResolution));
             }
             self.unit_cache.borrow_mut().insert(lib.to_string(), parsed);
@@ -248,7 +248,9 @@ fn layer4_default(ext: &str) -> Option<&'static str> {
     Some(match ext {
         "taiv" => "https://t.kaiv.io",
         "faiv" => "https://f.kaiv.io",
-        "saiv" | "csaiv" => "https://s.kaiv.io",
+        // Mappings live on the schema registry — they are edges
+        // between schemas (SPEC.md § Mappings).
+        "saiv" | "csaiv" | "maiv" => "https://s.kaiv.io",
         _ => return None,
     })
 }
@@ -287,7 +289,7 @@ pub fn resolve_named(
 mod tests {
     use super::*;
 
-    const ACME_NET: &[u8] = b".!kaivtype 1 acme/net\n\n{tcp,udp}\n&proto=tcp\n";
+    const ACME_NET: &[u8] = b".!taiv 1 acme/net\n\n{tcp,udp}\n&proto=tcp\n";
 
     /// A resolver whose every base lookup is a filesystem miss —
     /// keeps these tests off the Layer 4 network hosts.

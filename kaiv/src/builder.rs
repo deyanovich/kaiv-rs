@@ -149,11 +149,11 @@ impl DaivBuilder {
         Ok(())
     }
 
-    /// The finished canonical document: the `.!kaiv 1` declaration,
+    /// The finished canonical document: the `.!kaiv` declaration,
     /// type-library imports, source declarations, then the data
     /// lines, one leaf per line.
     pub fn finish(&self) -> String {
-        let mut out = String::from(".!kaiv 1\n");
+        let mut out = String::from(".!kaiv\n");
         for lib in &self.types {
             let _ = writeln!(out, ".!types {lib}");
         }
@@ -193,6 +193,88 @@ impl DaivBuilder {
             write!(out, "#{dpid}").expect("string write");
         }
         Ok(out)
+    }
+}
+
+/// A programmatic builder for *authored* `.kaiv` documents — the
+/// same value-level API as [`DaivBuilder`], emitting the idiomatic
+/// human form instead of canonical lines.
+///
+/// A thin layer: every declaration and leaf delegates to an inner
+/// [`DaivBuilder`] (so the validation surface is identical), and
+/// [`finish`](KaivBuilder::finish) renders the accumulated document
+/// through the standard formatter's lift — grouped blocks, inline
+/// assignments where they read best, annotation lines above their
+/// fields, `str` left implicit. Use it wherever generated kaiv is
+/// destined for human eyes (scaffolding, examples, exports meant to
+/// be edited); use [`DaivBuilder`] when machines consume the result.
+///
+/// ```
+/// use kaiv::builder::KaivBuilder;
+///
+/// let mut b = KaivBuilder::new();
+/// b.leaf("/server::host", "str", "api.example.com", None).unwrap();
+/// b.leaf("/server::port", "int", "8443", None).unwrap();
+/// let kaiv = b.finish().unwrap();
+/// assert_eq!(
+///     kaiv,
+///     ".!kaiv\n\n(/server)\nhost=api.example.com\n!int\nport=8443\n()\n"
+/// );
+/// ```
+#[derive(Debug, Default)]
+pub struct KaivBuilder {
+    inner: DaivBuilder,
+}
+
+impl KaivBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// See [`DaivBuilder::declare_types`].
+    pub fn declare_types(&mut self, lib: &str) -> Result<(), PipelineError> {
+        self.inner.declare_types(lib)
+    }
+
+    /// See [`DaivBuilder::declare_source`].
+    pub fn declare_source(&mut self, id: &str, uri: &str) -> Result<(), PipelineError> {
+        self.inner.declare_source(id, uri)
+    }
+
+    /// See [`DaivBuilder::leaf`].
+    pub fn leaf(
+        &mut self,
+        namepath: &str,
+        type_name: &str,
+        value: &str,
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        self.inner.leaf(namepath, type_name, value, prov)
+    }
+
+    /// See [`DaivBuilder::leaf_with_unit`].
+    pub fn leaf_with_unit(
+        &mut self,
+        namepath: &str,
+        type_name: &str,
+        unit: Option<&str>,
+        value: &str,
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        self.inner
+            .leaf_with_unit(namepath, type_name, unit, value, prov)
+    }
+
+    /// The finished document in idiomatic authored form. Leaves are
+    /// rendered in insertion order; consecutive leaves under one
+    /// namespace group into a block (or an inline assignment when
+    /// that reads better), and dollar signs in values re-author as
+    /// the `$$` escape.
+    pub fn finish(&self) -> Result<String, PipelineError> {
+        // The inner document is canonical-shaped; hand it to the
+        // formatter's lift under its canonical declaration.
+        let daiv = self.inner.finish().replacen(".!kaiv\n", ".!daiv\n", 1);
+        crate::fmt::lift(&daiv)
     }
 }
 
@@ -360,7 +442,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             b.finish(),
-            ".!kaiv 1\n.?sensor1 https://sensors.example.com/1\n\
+            ".!kaiv\n.?sensor1 https://sensors.example.com/1\n\
              !str?sensor1@20250115T093000Z#req-42'::temp=100\n"
         );
     }
@@ -411,7 +493,43 @@ mod tests {
         };
         assert!(b.leaf("::a", "str", "x", Some(&ts)).is_err());
         // nothing invalid leaked into the document
-        assert_eq!(b.finish(), ".!kaiv 1\n");
+        assert_eq!(b.finish(), ".!kaiv\n");
+    }
+
+    #[test]
+    fn kaiv_builder_lifts_to_idiomatic_form() {
+        let mut b = KaivBuilder::new();
+        b.declare_source("s1", "https://sensors.example.com/1")
+            .unwrap();
+        b.leaf("/server::host", "str", "api.example.com", None)
+            .unwrap();
+        b.leaf("/server::port", "int", "8443", None).unwrap();
+        b.leaf("/@tags::0", "str", "prod", None).unwrap();
+        b.leaf("/@tags::1", "str", "eu", None).unwrap();
+        b.leaf(
+            "::temp",
+            "float",
+            "21.5",
+            Some(&Provenance {
+                source: Some("s1".into()),
+                timestamp: None,
+                dpid: None,
+            }),
+        )
+        .unwrap();
+        b.leaf("::price", "str", "US$5", None).unwrap();
+        let kaiv = b.finish().unwrap();
+        assert_eq!(
+            kaiv,
+            ".!kaiv\n.?s1 https://sensors.example.com/1\n\n(/server)\nhost=api.example.com\n!int\nport=8443\n()\n\n/@tags;=prod;eu\n!float?s1\ntemp=21.5\nprice=US$$5\n"
+        );
+        // The authored form compiles, and rebuilding it reproduces
+        // the canonical facts the values carried.
+        let raiv = crate::compile(kaiv.as_bytes()).expect("authored form compiles");
+        let daiv = crate::denormalize(&raiv).expect("and denormalizes");
+        assert!(daiv.contains("!float?s1'::temp=21.5"), "{daiv}");
+        assert!(daiv.contains("!str'::price=US$5"), "{daiv}");
+        assert!(daiv.contains("!int'/server::port=8443"), "{daiv}");
     }
 
     #[test]

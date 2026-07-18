@@ -1,4 +1,4 @@
-.!kaivtype 1 std/math
+.!taiv 1 std/math
 
 // Complex number — a+bi with both components always present, the
 // separator sign carrying the imaginary part's sign, no spaces,

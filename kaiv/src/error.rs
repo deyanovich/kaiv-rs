@@ -13,6 +13,10 @@ pub enum LexError {
     MissingFinalEol,
     InvalidVersion,
     UnsupportedVersion,
+    /// A stream consumed as a canonical kind (.raiv/.daiv/.csaiv)
+    /// does not open with the matching format declaration (SPEC.md
+    /// § Format Declaration).
+    FormatKind,
     EmptyKey,
     MissingOperator,
     InvalidKey,
@@ -29,6 +33,7 @@ impl LexError {
             LexError::MissingFinalEol => "MISSING_FINAL_EOL_ERROR",
             LexError::InvalidVersion => "INVALID_VERSION_ERROR",
             LexError::UnsupportedVersion => "UNSUPPORTED_VERSION_ERROR",
+            LexError::FormatKind => "FORMAT_KIND_ERROR",
             LexError::EmptyKey => "EMPTY_KEY_ERROR",
             LexError::MissingOperator => "MISSING_OPERATOR_ERROR",
             LexError::InvalidKey => "INVALID_KEY_ERROR",
@@ -83,9 +88,17 @@ pub enum AppError {
     DuplicateKeySchema,
     UndefinedFieldStrictSchema,
     ProvenanceSchema,
+    /// A canonical consumer received a stream without the matching
+    /// format declaration (SPEC.md § Format Declaration). Mirrors
+    /// `LexError::FormatKind` for the Validator's error channel;
+    /// both render the same spec name.
+    FormatKind,
     TypeMismatch,
     ConstraintViolation,
     UniquenessViolation,
+    /// A `.maiv` leaves a required target-schema field unproduced
+    /// (SPEC.md § Publish-Time Validation) — checked statically.
+    IncompleteMapping,
     ReferentialIntegrity,
     CardinalityViolation,
     CollationUnsupported,
@@ -106,9 +119,11 @@ impl AppError {
             AppError::DuplicateKeySchema => "DuplicateKeySchemaError",
             AppError::UndefinedFieldStrictSchema => "UndefinedFieldStrictSchemaError",
             AppError::ProvenanceSchema => "ProvenanceSchemaError",
+            AppError::FormatKind => "FORMAT_KIND_ERROR",
             AppError::TypeMismatch => "TypeMismatchError",
             AppError::ConstraintViolation => "ConstraintViolationError",
             AppError::UniquenessViolation => "UniquenessViolationError",
+            AppError::IncompleteMapping => "IncompleteMappingError",
             AppError::ReferentialIntegrity => "ReferentialIntegrityError",
             AppError::CardinalityViolation => "CardinalityViolationError",
             AppError::CollationUnsupported => "CollationUnsupportedError",
