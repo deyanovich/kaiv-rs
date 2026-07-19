@@ -1,5 +1,12 @@
 [workspace]
-members = ["kaiv", "kaiv-cli", "kaiv-wasm"]
+members = ["kaiv", "kaiv-cli", "kaiv-lsp", "kaiv-wasm"]
+# kaiv-wasm is excluded from the default build set: its
+# `collation-colligo` feature unifies with kaiv-cli's default
+# `collation-icu` when the two are built together, tripping the
+# mutual-exclusion compile_error in kaiv/src/lib.rs. Build it
+# explicitly (wasm-pack, or `cargo build -p kaiv-wasm`), where it is
+# the only kaiv consumer and its feature set stands alone.
+default-members = ["kaiv", "kaiv-cli", "kaiv-lsp"]
 resolver = "2"
 
 # Workspace-level release profile (package-level profiles on non-root

@@ -1,7 +1,7 @@
 # kaiv-rs
 
 Reference implementation of the **kaiv** format (Levels 0–3) in
-Rust. A cargo workspace with two crates:
+Rust. A cargo workspace with four crates:
 
 - **`kaiv`** — the library. The certifiable reference pipeline;
   the Levels 0–2 core is zero-dependency, Level 3 collation rides
@@ -10,6 +10,18 @@ Rust. A cargo workspace with two crates:
 - **`kaiv-cli`** — the `kaiv` command-line binary, a thin shell
   over the library. Kept out of the library crate so its (future)
   dependencies never reach library consumers.
+- **`kaiv-lsp`** — a diagnostics-only language server over the
+  pipeline (stdio, synchronous): each open document runs the
+  stage its extension calls for and the first error publishes as
+  a whole-line diagnostic carrying the spec error name. Consumed
+  by the editor plugins in the sibling `editors` and `kaiv-vim`
+  repos; install with `cargo install --path kaiv-lsp`.
+- **`kaiv-wasm`** — the browser playground entry point behind
+  the sibling `demo` repo (demo.kaiv.io). Not in the default
+  build set: its `collation-colligo` choice cannot co-build with
+  the CLI's ICU default (the backends are mutually exclusive);
+  build it standalone via wasm-pack or `cargo build -p
+  kaiv-wasm`.
 
 kaiv is an immutable structural type system for data at rest; the
 specification and design documents live in the sibling `spec`
