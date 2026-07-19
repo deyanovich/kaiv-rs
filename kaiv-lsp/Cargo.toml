@@ -1,6 +1,6 @@
 [package]
 name = "kaiv-lsp"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.84.0"
 description = "Language server for the kaiv file family: live per-file diagnostics from the kaiv pipeline"
@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/kaiv-format/kaiv-rs"
 keywords = ["kaiv", "lsp", "language-server", "diagnostics"]
 categories = ["development-tools", "parser-implementations"]
-readme = "../README.md"
+readme = "README.md"
 
 [[bin]]
 name = "kaiv-lsp"
