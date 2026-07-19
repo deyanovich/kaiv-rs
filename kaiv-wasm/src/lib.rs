@@ -88,6 +88,16 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Format an authored `.kaiv` stream with the standard formatter
+/// (`kaiv fmt`): grouped namespace blocks, idiomatic sugar.
+#[wasm_bindgen]
+pub fn fmt(input: &str) -> String {
+    match kaiv::format_data(input) {
+        Ok(t) => ok(t),
+        Err(e) => err(e),
+    }
+}
+
 /// Authored `.kaiv` -> canonical `.daiv` (compile + denorm).
 #[wasm_bindgen]
 pub fn build(input: &str) -> String {
