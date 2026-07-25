@@ -84,6 +84,10 @@ pub enum AppError {
     /// § Default Values).
     SchemaOptionalWithoutDefault,
     SchemaResolution,
+    /// Strict resolution mode: a document-level `.!registry`
+    /// declaration would determine the base of a resolved artifact
+    /// (SPEC.md § Type Registry Resolution, strict mode).
+    RegistryStrict,
     RequiredFieldSchema,
     DuplicateKeySchema,
     UndefinedFieldStrictSchema,
@@ -115,6 +119,7 @@ impl AppError {
             AppError::SchemaInheritanceCycle => "SchemaInheritanceCycleError",
             AppError::SchemaOptionalWithoutDefault => "SchemaOptionalWithoutDefaultError",
             AppError::SchemaResolution => "SchemaResolutionError",
+            AppError::RegistryStrict => "RegistryStrictError",
             AppError::RequiredFieldSchema => "RequiredFieldSchemaError",
             AppError::DuplicateKeySchema => "DuplicateKeySchemaError",
             AppError::UndefinedFieldStrictSchema => "UndefinedFieldStrictSchemaError",

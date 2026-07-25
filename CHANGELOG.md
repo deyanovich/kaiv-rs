@@ -7,6 +7,162 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.7.0] - 2026-07-26
+--------------------
+
+### Added
+
+- **`kaiv::doc` — read-side access to canonical `.daiv`**
+  (`Doc`, `View`, `Typed`, `FromDaiv`): the mirror of
+  `builder`. Parse a `.daiv` stream once into an addressable
+  document, walk it with namepath-scoped views (`value` /
+  `typed` / `is_null` / `required`; `scalars` for `{arr}::N`
+  element lines, `elements` for `{arr}/N` element groups), and
+  decode consumer types via the `FromDaiv` trait — a server
+  answering typed requests reads
+  `MyParams::from_daiv(&doc.root().view("/params"))` while
+  `DaivBuilder` writes the reply, with no JSON detour on
+  either side.
+
+- **Quoted names as interior path segments** (spec § Quoted
+  Names, the D-4 ruling). Quoted names are legal as any namepath
+  segment — between `/` steps, after `@`, after `::` — through
+  the whole pipeline: the canonical § 2.3.4 examples
+  (`!str'/app/"dark-mode"::enabled=true`,
+  `!int'/@"x-servers"/0::"retry-count"=3`) round-trip
+  byte-exactly. The path splits are quote-aware end to end (a
+  quoted name may contain `/`, `::`, or `@` literally), the
+  MUST-iff rule holds in every segment position (authored
+  over-quoting of a bare-able name normalizes away; non-bare
+  names must be quoted — `INVALID_KEY_ERROR` otherwise), and a
+  quoted all-digit segment stays an ordinary name, never an
+  array index. `fk-path` remains bare-segment-only, a documented
+  subset boundary.
+- **`..time` compares RFC 3339 instants** (the D-4 ruling).
+  Range evaluation under the `..time` span is offset-aware
+  temporal comparison — `2025-12-31T23:00:00+01:00` equals
+  `2026-01-01T00:00:00+02:00` — via a constant-memory RFC 3339
+  parse covering the four `std/time` shapes; fractional seconds
+  compare numerically. Off-shape operands keep byte order. Enum
+  membership stays byte equality (§ 2.6.11 scopes span orderings
+  to ranges; the § 5.3 equality extension is `..lex[locale]`
+  only).
+- **Map key constraints — the ostensive block surface** (the D-2
+  ruling). A `.saiv` declares a keyed map as a `(/name)` block
+  mirroring the data form: optional `min=`/`max=` entry-count
+  bounds on the header, a type-annotation line for entry values,
+  and a `/regex/` key line (the key grammar). Lowers to the
+  § 7.5 compiled form (`[key::…]` clause + bounds on the
+  collection line, then the entry line); the Validator enforces
+  the key grammar per entry (`ConstraintViolationError`, matched
+  on the name's content) and the entry count
+  (`CardinalityViolationError`). Literal key lines inside map
+  blocks are out of scope and reject statically
+  (`INVALID_CONSTRAINT_ERROR`). The flat `!map<T>` form remains
+  the unkeyed map.
+- **Level 3 strict unknown-input semantics** (the D-8 ruling):
+  an ill-formed `..lex[tag]` locale is now
+  `INVALID_CONSTRAINT_ERROR` at schema-compile time (new
+  internal BCP 47 well-formedness check, backend-independent —
+  previously deferred to validation); a well-formed tag whose
+  primary language CLDR does not know refuses to resolve under
+  the ICU backend instead of silently falling back to root
+  (likely-subtags detection); an unrecognized `-u-` key (or any
+  non-`u` extension) is `CollationUnsupportedError`; explicit
+  `..lex[und]` means root collation on both backends (colligo
+  previously refused it).
+- **Conformance runner: Level gating and resolution modes.** The
+  runner honors the tree's `LEVEL` marker (Level 3 vectors run
+  as written under ICU; an honest-partial build substitutes
+  `partial.expected` or skips) and the `MODE` marker
+  (`registry-strict` / `registry-canonical`).
+- **Resolution provenance events and strict/canonical registry
+  modes.** The Resolver records a `ResolutionEvent` per resolved
+  artifact (drained via `take_resolutions`) and honors two
+  off-by-default `Config` toggles: `strict_registry`
+  (`--registry-strict` / `KAIV_REGISTRY_STRICT` — refuses a
+  Layer 1 `.!registry` win with `RegistryStrictError` before any
+  fetch) and `canonical_registry` (`--registry-canonical` /
+  `KAIV_REGISTRY_CANONICAL` — Layers 1–2 ignored, everything
+  resolves through the Layer 4 default hosts). The CLI grows the
+  two flags plus `-v`/`--verbose` resolution reporting.
+
+- **Builder: schema declarations and the served form.**
+  `DaivBuilder::declare_schema` emits `.!schema:<ref>` header
+  lines in declaration order — composition order is composed
+  field order, so a server emitting an envelope sandwich
+  declares head, data, tail in sequence — and `finish_daiv`
+  renders the document under the canonical `.!daiv` declaration
+  (every builder line is already canonical, so the artifact is
+  directly `Doc::parse`-able and `validate`-able). `KaivBuilder`
+  mirrors `declare_schema`.
+
+- **Multi-line values through the builder and the doc reader.**
+  `DaivBuilder::leaf_text` emits multi-line text as the core
+  `!text` type (newlines become the `|:|` separator on a flat
+  canonical line; a literal `|:|` in the content is refused
+  toward the embed route, CRLF toward normalization) and
+  `DaivBuilder::leaf_embed` emits base64url `std/enc/<kind>`
+  payloads for everything the flat line cannot carry —
+  `KaivBuilder` mirrors both. On the read side,
+  `doc::View::text` resolves `|:|` back to newlines (accepting
+  plain `str` as the coercion's read half) and `View::embed`
+  decodes `std/enc` payloads to `(kind, bytes)`. The base64url
+  helpers move to a feature-free core module (`kaiv::b64`);
+  `json::b64url_{encode,decode}` remain as re-exports.
+
+- **Exporters resolve custom heads** (spec § Exporters Resolve
+  Custom Heads). New `export_with(canonical, &Resolver)` on every
+  exporter (json / yaml / toml / xml / cbor / avro / asn1 /
+  proto — all through the shared tree), interpreting custom type
+  heads by, in order: the `.taiv` chain via the resolver (a
+  `..num` lowering exports as a number, a `{true,false}` enum as
+  a boolean), then the document's declared `.!schema` — the
+  vendored `.csaiv` a validating device already holds carries
+  every field's lowered base kind, so offline export needs no new
+  artifact. Best-effort and total: an uninterpretable head, or a
+  value that does not fit the resolved kind, exports as its
+  string — resolution refines, it cannot reject. The CLI's
+  `export` resolves by default; `--no-resolve` keeps the
+  uninterpreted forms. Plain `export()` is unchanged.
+
+### Fixed
+
+- **Scalar-array cardinality counted zero elements.** A
+  `[min=N]`/`[max=M]` header on a scalar array (elements are
+  `{arr}::N` value lines, not field groups) was checked
+  against the namespace-array element counter only, so every
+  non-empty batch failed `min` and no batch could fail `max`.
+  The Pass 1 counter now also counts scalar element lines
+  (conformance `schema/042-scalar-array-cardinality`).
+
+### Changed
+
+- **Head-type retention** (spec § The Schema Compiler). The
+  compiled schema now retains each field's authored head type
+  name as its leading item (`!int`, `!std/time/datetime`,
+  `!acme/net/port` — the most derived authored name; the
+  identity `str` stays elided) instead of lowering every
+  non-str/text/unit/union name away. On top of it, the
+  schema-aware Denormalizer generalizes the old str→text retype
+  to a full **type lift**: untyped (`!str`) data lines on typed
+  fields are emitted into `.daiv` under the head type, and
+  materialized defaults are typed with it — so `.daiv` states
+  every value's type on the line and exporters regain native
+  int/bool/float/datetime fidelity with no schema lookup
+  downstream of the build (the reviewer-reported
+  everything-exports-as-strings gap). Validation is now nominal
+  only where the name IS the semantics — unions, `null`, `text`
+  (guarded coercion), `std/enc` embeds, the explicit `!str`
+  identity head — and structural elsewhere (`!int` under
+  `!std/net/port` validates; so does the pre-lift `!str` form).
+  `.csaiv` artifacts regenerate; the item grammar is unchanged
+  (the head is one more token from the existing vocabulary).
+
+- **`kaiv fmt` always emits a format declaration**: a bare
+  `.!kaiv` is inserted (after any shebang) when the input
+  carries none — the canonical authored form declares itself.
+
 [0.6.0] - 2026-07-18
 --------------------
 

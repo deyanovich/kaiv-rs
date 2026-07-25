@@ -19,6 +19,18 @@ pub struct Config {
     /// Network-cache root (`/cache::dir`, relative to `base_dir`).
     /// None → `KAIV_CACHE_DIR` / XDG default.
     pub cache_dir: Option<PathBuf>,
+    /// Strict resolution mode (SPEC.md § Type Registry Resolution):
+    /// a document-level `.!registry` declaration that would determine
+    /// an artifact's base raises `RegistryStrictError` instead of
+    /// resolving. Set via `KAIV_REGISTRY_STRICT`.
+    pub strict_registry: bool,
+    /// Canonical resolution mode: Layers 1–2 are ignored entirely
+    /// and every artifact resolves through the Layer 4 default
+    /// registry — no declaration, configuration file, or environment
+    /// variable can redirect resolution. Subsumes strict mode (a
+    /// Layer 1 declaration is dormant by construction). Set via
+    /// `KAIV_REGISTRY_CANONICAL`.
+    pub canonical_registry: bool,
 }
 
 impl Config {
@@ -53,6 +65,8 @@ impl Config {
             registries,
             base_dir,
             cache_dir,
+            strict_registry: false,
+            canonical_registry: false,
         })
     }
 
@@ -69,7 +83,17 @@ impl Config {
     /// applied automatically: conformance runs stay deterministic.
     pub fn apply_env(&mut self) {
         for (k, v) in std::env::vars() {
-            if let Some(prefix) = k.strip_prefix("KAIV_REGISTRY_") {
+            if k == "KAIV_REGISTRY_STRICT" || k == "KAIV_REGISTRY_CANONICAL" {
+                // Mode toggles, not prefix overrides (same
+                // truthiness as KAIV_OFFLINE).
+                if !v.is_empty() && v != "0" {
+                    if k == "KAIV_REGISTRY_STRICT" {
+                        self.strict_registry = true;
+                    } else {
+                        self.canonical_registry = true;
+                    }
+                }
+            } else if let Some(prefix) = k.strip_prefix("KAIV_REGISTRY_") {
                 self.registries.insert(prefix.to_lowercase(), v);
             } else if k == "KAIV_REGISTRY" {
                 self.registries.insert("default".into(), v);
@@ -113,5 +137,20 @@ mod tests {
         );
         assert_eq!(c.base_for("acme"), Some("https://types.acme.com"));
         assert_eq!(c.base_for("unknown"), Some("https://ktaiv.com"));
+    }
+
+    #[test]
+    fn env_strict_toggle_is_not_a_prefix_override() {
+        std::env::set_var("KAIV_REGISTRY_STRICT", "1");
+        std::env::set_var("KAIV_REGISTRY_CANONICAL", "1");
+        let mut c = Config::default();
+        c.apply_env();
+        std::env::remove_var("KAIV_REGISTRY_STRICT");
+        std::env::remove_var("KAIV_REGISTRY_CANONICAL");
+        assert!(c.strict_registry);
+        assert!(c.canonical_registry);
+        // The toggles must not be misread as KAIV_REGISTRY_{PREFIX}.
+        assert!(!c.registries.contains_key("strict"));
+        assert!(!c.registries.contains_key("canonical"));
     }
 }

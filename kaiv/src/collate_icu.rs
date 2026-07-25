@@ -46,10 +46,37 @@ fn cached(tag: &str) -> Option<Rc<CollatorBorrowed<'static>>> {
 }
 
 /// Build a collator for the tag inside `..lex[…]`. `None` when the
-/// tag is not a well-formed BCP 47 tag or carries an override value
-/// outside the spec's recognized set.
+/// tag is not a well-formed BCP 47 tag, carries an override key or
+/// value outside the spec's recognized set, or names a language CLDR
+/// has no entry for (the D-8 strict package: nothing silently
+/// reorders — root collation is selected only by an explicit
+/// `..lex[und]`, never by fallback).
 fn build(tag: &str) -> Option<CollatorBorrowed<'static>> {
     let locale: Locale = tag.parse().ok()?;
+    // Only the four recognized `-u-` collation keys select behavior
+    // (SPEC.md § Reference Collation: ks, ka, kc, co); any other key
+    // — or a bare `-u-` attribute, or a non-`u` extension — carries
+    // instructions this backend would otherwise drop silently.
+    let ext = &locale.extensions;
+    if !ext.unicode.attributes.is_empty()
+        || !ext.transform.is_empty()
+        || !ext.other.is_empty()
+        || ext
+            .unicode
+            .keywords
+            .iter()
+            .any(|(k, _)| ![key!("ks"), key!("ka"), key!("kc"), key!("co")].contains(k))
+    {
+        return None;
+    }
+    // A well-formed tag whose language has no CLDR entry would reach
+    // root only by fallback — reject it; `und` is the explicit,
+    // legal spelling for root collation.
+    if locale.id.language != icu_locale_core::subtags::Language::UNKNOWN
+        && !cldr_covers(&locale)
+    {
+        return None;
+    }
     let mut options = CollatorOptions::default();
     options.strength = Some(match keyword(&locale, key!("ks")).as_deref() {
         None | Some("level3") => Strength::Tertiary,
@@ -80,6 +107,22 @@ fn keyword(locale: &Locale, k: Key) -> Option<String> {
         .keywords
         .get(&k)
         .map(|v| v.to_string())
+}
+
+/// Does CLDR know the tag's primary language subtag? Collation data
+/// alone cannot answer this — CLDR stores tailorings only where they
+/// differ from root, so `en` (a real language whose collation *is*
+/// root, by CLDR's own definition) and `zz` (an unknown language
+/// that would reach root only by fallback) look identical there. The
+/// likely-subtags data does discriminate: every language CLDR covers
+/// maximizes; an unknown one is left untouched. The D-8 rider asks
+/// exactly for this: detect the silent root *fallback*, not the
+/// deliberate root *inheritance* of a known language.
+fn cldr_covers(locale: &Locale) -> bool {
+    use icu_locale::{LocaleExpander, TransformResult};
+    let mut lang_only = icu_locale_core::LanguageIdentifier::UNKNOWN;
+    lang_only.language = locale.id.language;
+    LocaleExpander::new_extended().maximize(&mut lang_only) == TransformResult::Modified
 }
 
 /// Whether this runtime can compare under the tag.
@@ -171,8 +214,21 @@ mod tests {
         // Well-formed but unrecognized override value (the spec
         // recognizes level1|level2|level3|identic only).
         assert!(!resolves("en-u-ks-level4"));
-        // Well-formed unknown language falls back to root — usable.
-        assert!(resolves("zz"));
+        // An unrecognized `-u-` key — or any non-`u` extension —
+        // carries instructions that must never be dropped silently
+        // (D-8): kn/kf are real collation keys, just outside the
+        // spec's recognized set.
+        assert!(!resolves("en-u-kn-true"));
+        assert!(!resolves("en-u-kf-upper"));
+        assert!(!resolves("en-t-de"));
+        // A well-formed language with no CLDR entry must not fall
+        // back to root silently (D-8): authors wanting root say so.
+        assert!(!resolves("zz"));
+        assert!(resolves("und"));
+        // Region/script fallback within a covered language is not
+        // root fallback — en-US resolves via en.
         assert!(resolves("en-US"));
+        assert!(resolves("fr-CA"));
+        assert!(resolves("ja"));
     }
 }

@@ -289,7 +289,21 @@ fn f16_to_f64(h: u16) -> f64 {
 // --------------------------------------------------------------- export
 
 pub fn export(canonical: &str) -> Result<Vec<u8>, PipelineError> {
-    let root = node_to_val(&json::tree(canonical)?)?;
+    export_tree(json::tree(canonical)?)
+}
+
+/// Type-resolving export: [`export`] with custom heads interpreted
+/// through the resolver / the declared schema (see
+/// [`json::export_with`](crate::json::export_with)).
+pub fn export_with(
+    canonical: &str,
+    resolver: &crate::resolve::Resolver,
+) -> Result<Vec<u8>, PipelineError> {
+    export_tree(json::tree_resolved(canonical, resolver)?)
+}
+
+fn export_tree(tree: json::Node) -> Result<Vec<u8>, PipelineError> {
+    let root = node_to_val(&tree)?;
     let mut out = Vec::new();
     emit(&root, &mut out, 0)?;
     Ok(out)

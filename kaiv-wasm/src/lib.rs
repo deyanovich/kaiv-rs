@@ -88,12 +88,165 @@ pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// A resolver seeded with host-supplied artifacts: three parallel
+/// arrays of (lib, ext, text). The browser drives the resolve
+/// loop — run, drain the misses from the envelope, fetch them
+/// from the registries, retry with a longer preload list.
+fn resolver_with(libs: Vec<String>, exts: Vec<String>, texts: Vec<String>) -> kaiv::Resolver {
+    let r = kaiv::Resolver::offline();
+    for ((lib, ext), text) in libs.iter().zip(exts.iter()).zip(texts.iter()) {
+        r.preload(lib, ext, text.as_bytes().to_vec());
+    }
+    r
+}
+
+/// Error envelope carrying unresolved dependencies:
+/// `{"ok":false,"error":…,"missing":[["lib","ext"],…]}`. An empty
+/// `missing` means the error is final — no fetch will help.
+fn err_missing(r: &kaiv::Resolver, e: impl std::fmt::Display) -> String {
+    let missing = r.take_missing();
+    if missing.is_empty() {
+        return err(e);
+    }
+    let pairs: Vec<String> = missing
+        .iter()
+        .map(|(l, x)| format!("[{},{}]", quote(l), quote(x)))
+        .collect();
+    format!(
+        "{{\"ok\":false,\"error\":{},\"missing\":[{}]}}",
+        quote(&e.to_string()),
+        pairs.join(",")
+    )
+}
+
+/// `build` with host preloads and a missing-deps envelope: the
+/// registry-resolving build loop's engine.
+#[wasm_bindgen(js_name = buildR)]
+pub fn build_r(input: &str, libs: Vec<String>, exts: Vec<String>, texts: Vec<String>) -> String {
+    let r = resolver_with(libs, exts, texts);
+    match kaiv::compile_with(input.as_bytes(), &r)
+        .and_then(|raiv| kaiv::denorm::denormalize_with(&raiv, &r))
+    {
+        Ok(daiv) => ok(daiv),
+        Err(e) => err_missing(&r, e),
+    }
+}
+
+/// `compileSchema` with host preloads and the missing envelope.
+#[wasm_bindgen(js_name = compileSchemaR)]
+pub fn compile_schema_r(
+    saiv: &str,
+    libs: Vec<String>,
+    exts: Vec<String>,
+    texts: Vec<String>,
+) -> String {
+    let r = resolver_with(libs, exts, texts);
+    match kaiv::compile_schema_with(saiv.as_bytes(), &r) {
+        Ok(csaiv) => ok(csaiv),
+        Err(e) => err_missing(&r, e),
+    }
+}
+
+/// `infer` with host preloads and the missing envelope (the
+/// example document may import registry types or units).
+#[wasm_bindgen(js_name = inferR)]
+pub fn infer_r(
+    input: &str,
+    name: &str,
+    libs: Vec<String>,
+    exts: Vec<String>,
+    texts: Vec<String>,
+) -> String {
+    let r = resolver_with(libs, exts, texts);
+    let daiv = match kaiv::compile_with(input.as_bytes(), &r)
+        .and_then(|raiv| kaiv::denorm::denormalize_with(&raiv, &r))
+    {
+        Ok(d) => d,
+        Err(e) => return err_missing(&r, e),
+    };
+    match kaiv::infer::infer(&daiv, name) {
+        Ok(s) => ok(s),
+        Err(e) => err_missing(&r, e),
+    }
+}
+
+/// `validate` with host preloads and the missing envelope: the
+/// schema compiles through the same resolver, so registry types,
+/// units, and inherited schemas all participate.
+#[wasm_bindgen(js_name = validateR)]
+pub fn validate_r(
+    daiv: &str,
+    saiv: &str,
+    libs: Vec<String>,
+    exts: Vec<String>,
+    texts: Vec<String>,
+) -> String {
+    let r = resolver_with(libs, exts, texts);
+    let csaiv = match kaiv::compile_schema_with(saiv.as_bytes(), &r) {
+        Ok(c) => c,
+        Err(e) => return err_missing(&r, format!("schema: {e}")),
+    };
+    let compiled = match kaiv::parse_csaiv(&csaiv) {
+        Ok(c) => c,
+        Err(e) => return err(format!("schema: {e}")),
+    };
+    match kaiv::validate(daiv, &compiled) {
+        Ok(()) => ok("pass".into()),
+        Err(e) => err_missing(&r, e),
+    }
+}
+
+/// Compile an authored `.saiv` to its `.csaiv` — the form the
+/// registry gate byte-checks against a sibling deposit and the
+/// validator resolves (offline: `.!types`/`.!units` beyond the
+/// embedded std libraries do not resolve here).
+#[wasm_bindgen(js_name = compileSchema)]
+pub fn compile_schema(saiv: &str) -> String {
+    let r = kaiv::Resolver::offline();
+    match kaiv::compile_schema_with(saiv.as_bytes(), &r) {
+        Ok(csaiv) => ok(csaiv),
+        Err(e) => err(e),
+    }
+}
+
+/// BLAKE3 hex of the input — kdaiv's content-address for
+/// `.kaiv`/`.daiv` deposits.
+#[wasm_bindgen(js_name = b3hex)]
+pub fn b3hex(input: &str) -> String {
+    ok(blake3::hash(input.as_bytes()).to_hex().to_string())
+}
+
 /// Format an authored `.kaiv` stream with the standard formatter
 /// (`kaiv fmt`): grouped namespace blocks, idiomatic sugar.
 #[wasm_bindgen]
 pub fn fmt(input: &str) -> String {
     match kaiv::format_data(input) {
         Ok(t) => ok(t),
+        Err(e) => err(e),
+    }
+}
+
+/// Authored `.kaiv` -> canonical `.daiv`, with an in-memory
+/// `.saiv` preloaded into the resolver so a `.!schema:` reference
+/// resolves without a registry — the playground's schema pane fed
+/// straight to the pipeline (schema-declared defaults materialize,
+/// required-field checks apply).
+#[wasm_bindgen(js_name = buildWith)]
+pub fn build_with(input: &str, schema_name: &str, saiv: &str) -> String {
+    let r = kaiv::Resolver::offline();
+    if !schema_name.is_empty() && !saiv.is_empty() {
+        // Validation resolves the compiled form; inheritance the
+        // source form. Feed both from the one authored schema.
+        r.preload(schema_name, "saiv", saiv.as_bytes().to_vec());
+        match kaiv::compile_schema_with(saiv.as_bytes(), &r) {
+            Ok(csaiv) => r.preload(schema_name, "csaiv", csaiv.into_bytes()),
+            Err(e) => return err(e),
+        }
+    }
+    match kaiv::compile_with(input.as_bytes(), &r)
+        .and_then(|raiv| kaiv::denorm::denormalize_with(&raiv, &r))
+    {
+        Ok(daiv) => ok(daiv),
         Err(e) => err(e),
     }
 }

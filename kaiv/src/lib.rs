@@ -15,8 +15,10 @@
 //! emitted on error.
 
 pub mod anno;
+pub mod b64;
 #[cfg(feature = "asn1")]
 pub mod asn1;
+mod bcp47;
 #[cfg(feature = "avro")]
 pub mod avro;
 pub mod builder;
@@ -40,6 +42,7 @@ pub mod collate;
 pub mod compiler;
 pub mod config;
 pub mod denorm;
+pub mod doc;
 pub mod error;
 pub mod faiv;
 pub mod fmt;
@@ -76,9 +79,10 @@ pub use builder::{DaivBuilder, KaivBuilder, Provenance};
 pub use compiler::{compile, compile_with};
 pub use config::Config;
 pub use denorm::{denormalize, denormalize_with};
+pub use doc::{Doc, FromDaiv, Typed, View};
 pub use fmt::{format_data, format_plain, lift};
 pub use error::{AppError, AppErrorAt, LexError, LexErrorAt, PipelineError};
 pub use lexer::{lex, FileKind};
-pub use resolve::Resolver;
+pub use resolve::{ResolutionEvent, ResolutionLayer, Resolver};
 pub use schema::{check_type_lib, compile_schema, compile_schema_with};
 pub use validator::{parse_csaiv, schema_for_daiv, validate, CompiledSchema, ProvenanceLevel};

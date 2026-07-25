@@ -11,17 +11,37 @@ mod account;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// `-v` / `--verbose`: report resolution provenance on stderr.
+static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 const USAGE: &str = "\
 kaiv — reference toolchain for the kaiv format (Levels 0-3)
 
 USAGE:
-    kaiv [--offline] <COMMAND> [ARGS]
+    kaiv [--offline] [--registry-strict] [-v] <COMMAND> [ARGS]
 
     --offline: resolve registries from the local cache only
     (equivalent to KAIV_OFFLINE=1; cache root: KAIV_CACHE_DIR,
     else ~/.cache/kaiv, overridable per-project via /cache::dir
     in kaiv.kaiv)
+
+    --registry-strict: refuse resolution steered by a document's
+    own .!registry declarations (RegistryStrictError) — an
+    untrusted document could otherwise redirect its declared
+    schema to a base it controls. Equivalent to
+    KAIV_REGISTRY_STRICT=1; kaiv.kaiv and KAIV_REGISTRY_*
+    remain in effect.
+
+    --registry-canonical: resolve every artifact through the
+    default registries alone — .!registry declarations,
+    kaiv.kaiv, and KAIV_REGISTRY_* are all ignored, so no
+    override anywhere can redirect resolution. Equivalent to
+    KAIV_REGISTRY_CANONICAL=1; subsumes --registry-strict.
+
+    -v, --verbose: report resolution provenance on stderr (per
+    artifact: reference, winning layer, base, location)
 
 COMMANDS:
     compile  [file.kaiv]              authored -> relational canonical (.raiv)
@@ -94,6 +114,11 @@ COMMANDS:
                                       formats write raw bytes to
                                       stdout; --proto needs --schema
                                       / --message like import);
+                                      custom type heads resolve to
+                                      their base kinds via the
+                                      registries / the declared
+                                      schema (--no-resolve for the
+                                      uninterpreted string forms);
                                       .kaiv is built first, .daiv
                                       used as is, .raiv denormalized
                                       first, stdin sniffed
@@ -142,6 +167,24 @@ fn main() -> ExitCode {
         args.remove(i);
         std::env::set_var("KAIV_OFFLINE", "1");
     }
+    // Global flag: --registry-strict = refuse document-level
+    // .!registry resolution wins (the library reads
+    // KAIV_REGISTRY_STRICT; SPEC.md § Type Registry Resolution).
+    if let Some(i) = args.iter().position(|a| a == "--registry-strict") {
+        args.remove(i);
+        std::env::set_var("KAIV_REGISTRY_STRICT", "1");
+    }
+    // Global flag: --registry-canonical = Layer 4 only; no
+    // .!registry, kaiv.kaiv, or environment override can redirect
+    // resolution (the library reads KAIV_REGISTRY_CANONICAL).
+    if let Some(i) = args.iter().position(|a| a == "--registry-canonical") {
+        args.remove(i);
+        std::env::set_var("KAIV_REGISTRY_CANONICAL", "1");
+    }
+    if let Some(i) = args.iter().position(|a| a == "-v" || a == "--verbose") {
+        args.remove(i);
+        VERBOSE.store(true, Ordering::Relaxed);
+    }
     match run(&args) {
         Ok(out) => {
             use std::io::Write;
@@ -168,13 +211,26 @@ fn run(args: &[String]) -> Result<Vec<u8>, String> {
             }
             let canonical =
                 canonical_input(a.path.as_deref(), a.schema.as_deref(), a.message.as_deref())?;
+            if a.no_resolve {
+                return match f {
+                    "cbor" => kaiv::cbor::export(&canonical).map_err(|e| e.to_string()),
+                    "avro" => kaiv::avro::export(&canonical).map_err(|e| e.to_string()),
+                    "asn1" => kaiv::asn1::export(&canonical).map_err(|e| e.to_string()),
+                    _ => {
+                        let schema = proto_schema(&a)?;
+                        kaiv::proto::export(&canonical, &schema, a.message.as_deref())
+                            .map_err(|e| e.to_string())
+                    }
+                };
+            }
+            let r = resolver()?;
             return match f {
-                "cbor" => kaiv::cbor::export(&canonical).map_err(|e| e.to_string()),
-                "avro" => kaiv::avro::export(&canonical).map_err(|e| e.to_string()),
-                "asn1" => kaiv::asn1::export(&canonical).map_err(|e| e.to_string()),
+                "cbor" => kaiv::cbor::export_with(&canonical, &r).map_err(|e| e.to_string()),
+                "avro" => kaiv::avro::export_with(&canonical, &r).map_err(|e| e.to_string()),
+                "asn1" => kaiv::asn1::export_with(&canonical, &r).map_err(|e| e.to_string()),
                 _ => {
                     let schema = proto_schema(&a)?;
-                    kaiv::proto::export(&canonical, &schema, a.message.as_deref())
+                    kaiv::proto::export_with(&canonical, &schema, a.message.as_deref(), &r)
                         .map_err(|e| e.to_string())
                 }
             };
@@ -189,7 +245,7 @@ fn run_text(args: &[String]) -> Result<String, String> {
         ("compile", rest) if rest.len() <= 1 => {
             let r = resolver()?;
             let data = read_input(rest.first().map(String::as_str))?;
-            kaiv::compile_with(&data, &r).map_err(|e| e.to_string())
+            finish(kaiv::compile_with(&data, &r), &r)
         }
         ("denorm", rest) if rest.len() <= 1 => {
             // Schema-aware: when the document declares a .!schema,
@@ -198,18 +254,18 @@ fn run_text(args: &[String]) -> Result<String, String> {
             let r = resolver()?;
             let data = read_input(rest.first().map(String::as_str))?;
             let raiv = String::from_utf8(data).map_err(|e| e.to_string())?;
-            kaiv::denormalize_with(&raiv, &r).map_err(|e| e.to_string())
+            finish(kaiv::denormalize_with(&raiv, &r), &r)
         }
         ("build", rest) if rest.len() <= 1 => {
             let r = resolver()?;
             let data = read_input(rest.first().map(String::as_str))?;
-            let raiv = kaiv::compile_with(&data, &r).map_err(|e| e.to_string())?;
-            kaiv::denormalize_with(&raiv, &r).map_err(|e| e.to_string())
+            let raiv = finish(kaiv::compile_with(&data, &r), &r)?;
+            finish(kaiv::denormalize_with(&raiv, &r), &r)
         }
         ("schema", rest) if rest.len() <= 1 => {
             let r = resolver()?;
             let data = read_input(rest.first().map(String::as_str))?;
-            kaiv::compile_schema_with(&data, &r).map_err(|e| e.to_string())
+            finish(kaiv::compile_schema_with(&data, &r), &r)
         }
         ("validate", rest) if rest.len() <= 2 => {
             // Data comes from a file, or stdin when the argument is
@@ -234,15 +290,14 @@ fn run_text(args: &[String]) -> Result<String, String> {
                     let csaiv = if s.ends_with(".csaiv") {
                         String::from_utf8(read(s)?).map_err(|e| e.to_string())?
                     } else {
-                        kaiv::compile_schema_with(&read(s)?, &r).map_err(|e| e.to_string())?
+                        finish(kaiv::compile_schema_with(&read(s)?, &r), &r)?
                     };
                     kaiv::parse_csaiv(&csaiv).map_err(|e| e.to_string())?
                 }
                 // No schema argument: resolve the document's .!schema
                 // declarations through the registries (SPEC.md
                 // § Schema Composition; canonical hosts by default).
-                None => kaiv::schema_for_daiv(&daiv, &r)
-                    .map_err(|e| e.to_string())?
+                None => finish(kaiv::schema_for_daiv(&daiv, &r), &r)?
                     .ok_or("document declares no .!schema; pass a schema file")?,
             };
             match kaiv::validate(&daiv, &compiled) {
@@ -427,11 +482,21 @@ fn run_text(args: &[String]) -> Result<String, String> {
                 .ok_or("export requires a format option (e.g. --json)")?;
             let canonical =
                 canonical_input(a.path.as_deref(), a.schema.as_deref(), a.message.as_deref())?;
+            if a.no_resolve {
+                return match fmt.as_str() {
+                    "json" => kaiv::json::export(&canonical).map_err(|e| e.to_string()),
+                    "yaml" => kaiv::yaml::export(&canonical).map_err(|e| e.to_string()),
+                    "toml" => kaiv::toml::export(&canonical).map_err(|e| e.to_string()),
+                    "xml" => kaiv::xml::export(&canonical).map_err(|e| e.to_string()),
+                    other => Err(format!("unsupported export format: {other}")),
+                };
+            }
+            let r = resolver()?;
             match fmt.as_str() {
-                "json" => kaiv::json::export(&canonical).map_err(|e| e.to_string()),
-                "yaml" => kaiv::yaml::export(&canonical).map_err(|e| e.to_string()),
-                "toml" => kaiv::toml::export(&canonical).map_err(|e| e.to_string()),
-                "xml" => kaiv::xml::export(&canonical).map_err(|e| e.to_string()),
+                "json" => kaiv::json::export_with(&canonical, &r).map_err(|e| e.to_string()),
+                "yaml" => kaiv::yaml::export_with(&canonical, &r).map_err(|e| e.to_string()),
+                "toml" => kaiv::toml::export_with(&canonical, &r).map_err(|e| e.to_string()),
+                "xml" => kaiv::xml::export_with(&canonical, &r).map_err(|e| e.to_string()),
                 other => Err(format!("unsupported export format: {other}")),
             }
         }
@@ -546,7 +611,7 @@ fn schema_from(
         Some(p) if p.to_ascii_lowercase().ends_with(".csaiv") => {
             String::from_utf8(read(p)?).map_err(|e| e.to_string())?
         }
-        Some(p) => kaiv::compile_schema_with(&read(p)?, r).map_err(|e| e.to_string())?,
+        Some(p) => finish(kaiv::compile_schema_with(&read(p)?, r), r)?,
         None => {
             if reference.contains("://") {
                 return Err(format!(
@@ -554,7 +619,7 @@ fn schema_from(
                      (--source-schema / --target-schema)"
                 ));
             }
-            String::from_utf8(r.csaiv_bytes(reference, &[]).map_err(|e| e.to_string())?)
+            String::from_utf8(finish(r.csaiv_bytes(reference, &[]), r)?)
                 .map_err(|e| e.to_string())?
         }
     };
@@ -572,6 +637,7 @@ struct FmtArgs {
     path: Option<String>,
     schema: Option<String>,
     message: Option<String>,
+    no_resolve: bool,
 }
 
 /// `[--FORMAT] [--flat] [--schema F] [--message M] [path]` for
@@ -590,6 +656,7 @@ fn parse_fmt_args(rest: &[String]) -> Result<FmtArgs, String> {
             "--proto" => a.fmt = Some("proto".to_string()),
             "--asn1" => a.fmt = Some("asn1".to_string()),
             "--flat" => a.flat = true,
+            "--no-resolve" => a.no_resolve = true,
             "--schema" => a.schema = Some(it.next().ok_or("--schema needs a path")?.clone()),
             "--message" => a.message = Some(it.next().ok_or("--message needs a name")?.clone()),
             f if f.starts_with("--") => return Err(format!("unknown option: {f}")),
@@ -649,15 +716,15 @@ fn canonical_input(
                 {
                     // Schema-aware: materializes absent optional
                     // fields, so the result is a complete .daiv.
-                    return kaiv::denorm::denormalize_with(&t, &r).map_err(|e| e.to_string());
+                    return finish(kaiv::denorm::denormalize_with(&t, &r), &r);
                 }
                 return Ok(t);
             }
             t
         }
     };
-    let raiv = kaiv::compile_with(text.as_bytes(), &r).map_err(|e| e.to_string())?;
-    kaiv::denormalize_with(&raiv, &r).map_err(|e| e.to_string())
+    let raiv = finish(kaiv::compile_with(text.as_bytes(), &r), &r)?;
+    finish(kaiv::denormalize_with(&raiv, &r), &r)
 }
 
 /// Import format from a file extension.
@@ -902,6 +969,66 @@ fn resolver() -> Result<kaiv::Resolver, String> {
     };
     config.apply_env();
     Ok(kaiv::Resolver::new(config))
+}
+
+/// Finish a pipeline step that used `r`: drain its provenance log,
+/// report it on stderr under -v, and stringify the error — a
+/// strict-mode refusal names the blocking `.!registry` base(s) and
+/// the remediation regardless of -v.
+fn finish<T>(res: Result<T, kaiv::PipelineError>, r: &kaiv::Resolver) -> Result<T, String> {
+    use kaiv::ResolutionLayer;
+    let events = r.take_resolutions();
+    if VERBOSE.load(Ordering::Relaxed) {
+        for ev in &events {
+            match ev.layer {
+                ResolutionLayer::Preload => {
+                    eprintln!("kaiv: resolved {}.{} from preloaded sources", ev.lib, ev.ext)
+                }
+                // A Layer 1 event without a location is a strict-mode
+                // refusal recorded before any read.
+                ResolutionLayer::Layer1 if ev.location.is_empty() => eprintln!(
+                    "kaiv: refused {}.{} via layer 1 (.!registry -> {}) — strict mode",
+                    ev.lib, ev.ext, ev.base
+                ),
+                layer => {
+                    let name = match layer {
+                        ResolutionLayer::Layer1 => "layer 1 (.!registry)",
+                        ResolutionLayer::Layer2 => "layer 2 (kaiv.kaiv/env)",
+                        _ => "layer 4 (default registry)",
+                    };
+                    eprintln!(
+                        "kaiv: resolved {}.{} via {} {} -> {}",
+                        ev.lib, ev.ext, name, ev.base, ev.location
+                    );
+                }
+            }
+        }
+    }
+    res.map_err(|e| {
+        if matches!(
+            e,
+            kaiv::PipelineError::App(kaiv::AppError::RegistryStrict)
+        ) {
+            let blocked: Vec<String> = events
+                .iter()
+                .filter(|ev| ev.layer == ResolutionLayer::Layer1)
+                .map(|ev| {
+                    let prefix = ev.lib.split('/').next().unwrap_or(&ev.lib);
+                    format!(
+                        ".!registry {prefix}={} would control resolution of {}.{}",
+                        ev.base, ev.lib, ev.ext
+                    )
+                })
+                .collect();
+            format!(
+                "{e}: {}; rerun without --registry-strict, or vendor the \
+                 artifact via kaiv.kaiv",
+                blocked.join("; ")
+            )
+        } else {
+            e.to_string()
+        }
+    })
 }
 
 fn find_config(start: &Path) -> Option<PathBuf> {

@@ -3,7 +3,7 @@ name = "kaiv-wasm"
 description = "Browser playground entry point for the kaiv toolchain"
 # Mirrors the kaiv core version it wraps; surfaced in the
 # playground footer via version().
-version = "0.6.0"
+version = "0.7.0"
 publish = false
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -21,3 +21,6 @@ kaiv = { path = "../kaiv", default-features = false, features = [
   "graphql", "xsd", "collation-colligo",
 ] }
 wasm-bindgen = "0.2"
+# Content addresses for kdaiv deposits (the playground's publish
+# flow names .kaiv/.daiv artifacts by their BLAKE3 hex).
+blake3 = { version = "1", default-features = false }

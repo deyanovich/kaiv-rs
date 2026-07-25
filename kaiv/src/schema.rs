@@ -13,19 +13,31 @@ use crate::taiv::std_core;
 use std::collections::{HashMap, HashSet};
 
 /// Do all `/regex/` bodies in a field's compiled items compile under
-/// the pinned dialect? Union alternatives' groups included.
+/// the pinned dialect, and is every `..lex[tag]` locale tag a
+/// well-formed BCP 47 tag? Union alternatives' groups included. Tag
+/// well-formedness is static and backend-independent — the D-8
+/// ruling pins it to schema-compile time (INVALID_CONSTRAINT_ERROR),
+/// while a *well-formed* tag the collation backend cannot honor
+/// stays a validation-time CollationUnsupportedError.
 fn patterns_in_dialect(items: &[Item]) -> bool {
-    fn group_ok(cs: &[Constraint]) -> bool {
-        cs.iter().all(|c| match c {
+    fn constraint_ok(c: &Constraint) -> bool {
+        match c {
             Constraint::Pattern(b) => crate::rex::Regex::new(b).is_some(),
+            Constraint::Span(s) => match s.strip_prefix("..lex[").and_then(|r| r.strip_suffix(']')) {
+                Some(tag) => crate::bcp47::well_formed(tag),
+                None => true,
+            },
             _ => true,
-        })
+        }
     }
     items.iter().all(|it| match it {
-        Item::Constraint(Constraint::Pattern(b)) => crate::rex::Regex::new(b).is_some(),
-        Item::Constraint(_) | Item::Named(_) => true,
+        Item::Constraint(c) => constraint_ok(c),
+        Item::Named(_) => true,
         Item::Anno(a) => {
-            group_ok(&a.constraints) && a.union.iter().all(|alt| group_ok(&alt.constraints))
+            a.constraints.iter().all(constraint_ok)
+                && a.union
+                    .iter()
+                    .all(|alt| alt.constraints.iter().all(constraint_ok))
         }
     })
 }
@@ -63,6 +75,18 @@ pub fn check_type_lib(
         let mut col = Collected::default();
         bucket_items(&def.items, &lib.library, resolver, &[], &mut b, &mut col, 0)
             .map_err(|e| PipelineError::Other(format!("type &{name}: {e}")))?;
+        // Ill-formed `..lex[tag]` locale tags are static errors at
+        // publish time, like everywhere else (the D-8 ruling).
+        for s in &b.spans {
+            if let Some(tag) = s.strip_prefix("..lex[").and_then(|r| r.strip_suffix(']')) {
+                if !crate::bcp47::well_formed(tag) {
+                    return Err(PipelineError::Lex(crate::error::LexErrorAt {
+                        error: crate::error::LexError::InvalidConstraint,
+                        line: 0,
+                    }));
+                }
+            }
+        }
     }
     Ok(lib)
 }
@@ -78,10 +102,25 @@ fn compile_schema_chain(
     let mut out: Vec<String> = Vec::new();
     let mut pending: Option<Annotation> = None;
     let mut ns_prefix: Vec<String> = Vec::new();
-    // Segment count pushed by each open namespace block, so a
+    // One entry per open namespace block, innermost last, so a
     // multi-segment `(/a/b)` is popped whole on `()` (mirrors the data
-    // compiler's block-wise push/pop).
-    let mut ns_depth: Vec<usize> = Vec::new();
+    // compiler's block-wise push/pop). A block whose header carries
+    // `min=`/`max=` bounds, or whose body carries a pattern-key line,
+    // is a *map block* (SPEC.md § Maps in the Compiled Schema, the
+    // D-2 ostensive surface).
+    struct NsBlock {
+        /// Segment count this block pushed onto `ns_prefix`.
+        nseg: usize,
+        /// Entry-count bounds from the block header.
+        bounds: (Option<u64>, Option<u64>),
+        has_bounds: bool,
+        /// The block's map lines (entry line + collection line) have
+        /// been emitted — nothing else may appear inside it.
+        map_done: bool,
+        /// The block already holds ordinary member declarations.
+        content_seen: bool,
+    }
+    let mut ns_blocks: Vec<NsBlock> = Vec::new();
     let mut arr_prefix: Option<String> = None;
     let mut imports: Vec<String> = Vec::new();
     let mut unit_imports: Vec<String> = Vec::new();
@@ -233,26 +272,65 @@ fn compile_schema_chain(
                             .into(),
                     ));
                 }
-                // Quote-aware: a quoted segment may contain whitespace.
+                if ns_blocks.last().is_some_and(|b| b.map_done) {
+                    return Err(map_block_member_error(line.no));
+                }
+                // Quote-aware: a quoted segment may contain whitespace
+                // (token split) or `/` (step split).
                 let toks = crate::table::tokens(inner);
                 let head = toks.first().copied().unwrap_or("");
-                let segs: Vec<String> = head
-                    .trim_start_matches('/')
-                    .split('/')
-                    .filter(|s| !s.is_empty())
-                    .map(crate::compiler::normalize_seg)
-                    .collect();
-                ns_depth.push(segs.len());
+                let segs: Vec<String> =
+                    crate::lexer::split_slash(head.strip_prefix('/').unwrap_or(head))
+                        .into_iter()
+                        .filter(|s| !s.is_empty())
+                        .map(crate::compiler::normalize_seg)
+                        .collect();
+                // Header bounds mark a map block (the lexer admits
+                // only `min=`/`max=` digit tokens here, like table
+                // headers; `schema:` was rejected above).
+                let bounds = if toks.len() > 1 {
+                    let h = crate::table::parse_header(&toks[1..])
+                        .filter(|h| h.groups.is_empty())
+                        .ok_or_else(|| {
+                            PipelineError::Other(format!("bad map-block header: {inner}"))
+                        })?;
+                    Some((h.min, h.max))
+                } else {
+                    None
+                };
+                if let Some(b) = ns_blocks.last_mut() {
+                    b.content_seen = true;
+                }
+                ns_blocks.push(NsBlock {
+                    nseg: segs.len(),
+                    bounds: bounds.unwrap_or((None, None)),
+                    has_bounds: bounds.is_some(),
+                    map_done: false,
+                    content_seen: false,
+                });
                 ns_prefix.extend(segs);
             }
             LineKind::NsClose => {
                 // Pop the whole block's segments, not just one — a
                 // multi-segment `(/a/b)` pushed several.
-                if let Some(n) = ns_depth.pop() {
-                    ns_prefix.truncate(ns_prefix.len() - n);
+                if let Some(b) = ns_blocks.pop() {
+                    // Bounds ride the map-block header only: a block
+                    // that carried them but never declared its key
+                    // grammar is not the map surface (SPEC.md § Maps
+                    // in the Compiled Schema, the D-2 surface).
+                    if b.has_bounds && !b.map_done {
+                        return Err(map_block_member_error(line.no));
+                    }
+                    ns_prefix.truncate(ns_prefix.len() - b.nseg);
                 }
             }
             LineKind::SectionOpen(inner) => {
+                if ns_blocks.last().is_some_and(|b| b.map_done) {
+                    return Err(map_block_member_error(line.no));
+                }
+                if let Some(b) = ns_blocks.last_mut() {
+                    b.content_seen = true;
+                }
                 if arr_prefix.is_some() {
                     return Err(PipelineError::Other(
                         "nested schema section blocks are not supported".into(),
@@ -262,8 +340,8 @@ fn compile_schema_chain(
                 let head = toks.first().copied().unwrap_or("");
                 let mut all = ns_prefix.clone();
                 all.extend(
-                    head.trim_start_matches('/')
-                        .split('/')
+                    crate::lexer::split_slash(head.strip_prefix('/').unwrap_or(head))
+                        .into_iter()
                         .filter(|s| !s.is_empty())
                         .map(crate::compiler::normalize_seg),
                 );
@@ -289,6 +367,77 @@ fn compile_schema_chain(
                 arr_prefix = None;
             }
             LineKind::Content { left, value } => {
+                // A lowered map block admits nothing after its key
+                // line; in particular a literal key line (a required
+                // named entry) is outside the D-2 surface.
+                if ns_blocks.last().is_some_and(|b| b.map_done) {
+                    return Err(map_block_member_error(line.no));
+                }
+                // A pattern-key line — the whole left side is one
+                // `/regex/` in key position, nothing after `=` (the
+                // lexer classifies exactly that shape): the enclosing
+                // namespace block is a map block; the pending
+                // annotation types the entry VALUES, the pattern is
+                // the key grammar, and the block's header bounds ride
+                // the collection line (SPEC.md § Maps in the Compiled
+                // Schema).
+                if value.is_empty() {
+                    if let Some(pat) = single_pattern(left) {
+                        let Some(b) = ns_blocks.last_mut() else {
+                            // A key line outside any namespace block
+                            // has no map to describe.
+                            return Err(map_block_member_error(line.no));
+                        };
+                        if b.content_seen {
+                            return Err(map_block_member_error(line.no));
+                        }
+                        let a = pending.take().unwrap_or_default();
+                        if a.type_name == "map" {
+                            return Err(PipelineError::Other(
+                                "the annotation above a map key line types the entry \
+                                 values; !map<…> has no place there"
+                                    .into(),
+                            ));
+                        }
+                        let items = lower(&a, resolver, &registries)?;
+                        let joined = items.join(" ");
+                        let parsed = parse_constraint_items(&joined).ok_or_else(|| {
+                            PipelineError::Other(format!("bad lowered items: {joined}"))
+                        })?;
+                        // The key grammar and the value items must sit
+                        // inside the pinned regex dialect, like every
+                        // other compiled pattern.
+                        if crate::rex::Regex::new(&pat).is_none()
+                            || !patterns_in_dialect(&parsed)
+                        {
+                            return Err(PipelineError::Lex(crate::error::LexErrorAt {
+                                error: crate::error::LexError::InvalidConstraint,
+                                line: line.no,
+                            }));
+                        }
+                        let ns = format!("/{}", ns_prefix.join("/"));
+                        let header = crate::table::Header {
+                            groups: Vec::new(),
+                            key: Some(pat),
+                            min: b.bounds.0,
+                            max: b.bounds.1,
+                        };
+                        emit(
+                            &mut out,
+                            &inherited,
+                            &ns,
+                            format!("{ns} {}", crate::table::render_compiled(&header)),
+                        );
+                        let np = format!("{ns}::");
+                        check_dup(&inherited, &mut local_keys, &np)?;
+                        emit(&mut out, &inherited, &np, format!("{joined}'{np}="));
+                        b.map_done = true;
+                        continue;
+                    }
+                }
+                if let Some(b) = ns_blocks.last_mut() {
+                    b.content_seen = true;
+                }
                 // `/@path;=` declares a scalar vector: the annotation
                 // constrains every element (compiled `items'/@path::=`).
                 if let Some(path) = left.strip_suffix(';') {
@@ -296,8 +445,8 @@ fn compile_schema_chain(
                     let items = lower(&a, resolver, &registries)?;
                     let mut all = ns_prefix.clone();
                     all.extend(
-                        path.trim_start_matches('/')
-                            .split('/')
+                        crate::lexer::split_slash(path.strip_prefix('/').unwrap_or(path))
+                            .into_iter()
                             .filter(|s| !s.is_empty())
                             .map(crate::compiler::normalize_seg),
                     );
@@ -432,6 +581,31 @@ fn compile_schema_chain(
     Ok(s)
 }
 
+/// The `.saiv` left side, when it is exactly one `/regex/` pattern —
+/// a map-block key line (SPEC.md § Maps in the Compiled Schema, the
+/// D-2 ostensive surface). Returns the pattern body.
+fn single_pattern(left: &str) -> Option<String> {
+    let mut items = parse_constraint_items(left)?;
+    match items.as_mut_slice() {
+        [Item::Constraint(Constraint::Pattern(b))] => Some(std::mem::take(b)),
+        _ => None,
+    }
+}
+
+/// The clear compile error for an out-of-surface map-block member:
+/// a literal key line inside a map block (required named entries are
+/// outside the D-2 scope), a key line outside a block or beside
+/// other members, or header bounds on a block that never declares a
+/// key grammar. Reported as INVALID_CONSTRAINT_ERROR — the schema
+/// compiler's static shape-violation channel — with the offending
+/// line.
+fn map_block_member_error(line: usize) -> PipelineError {
+    PipelineError::Lex(crate::error::LexErrorAt {
+        error: crate::error::LexError::InvalidConstraint,
+        line,
+    })
+}
+
 /// Does the lowered item set admit `!null`? Only a union with a
 /// `null` head or alternative does — constraint-only lowerings have
 /// no null representation.
@@ -523,8 +697,11 @@ fn inherit(
     let compiled = compile_schema_chain(&bytes, resolver, chain);
     chain.pop();
     let compiled = compiled?;
-    let element_wise =
-        qualifier.is_some_and(|q| q.split('/').next_back().is_some_and(|s| s.starts_with('@')));
+    let element_wise = qualifier.is_some_and(|q| {
+        crate::lexer::split_slash(q)
+            .last()
+            .is_some_and(|s| s.starts_with('@'))
+    });
     for line in compiled.lines() {
         // Only field and collection lines inherit; the extending
         // schema's own header (.!saiv, .!provenance) governs.
@@ -708,12 +885,17 @@ fn lower_with_defaults(
     if let Some(u) = &col.unit {
         items.insert(0, format!("!{}:{u}", a.type_name));
     }
-    // `text` is likewise retained by name: it lowers to no value
-    // constraints, but the annotation carries export semantics
-    // (`|:|` line separation), so the parallel scan must enforce it
-    // (SPEC.md § The text Type).
-    if a.type_name == "text" {
-        items.insert(0, "!text".into());
+    // Head-type retention: the authored head type name survives
+    // lowering as the leading item — `!text` (export semantics, as
+    // before) and now every other non-`str` head, so the compiled
+    // schema states each field's type by name: `.daiv` self-
+    // description, and the source for the Denormalizer's type lift
+    // (SPEC.md § The Schema Compiler). A unit-carrying head already
+    // retained its `!type:unit` token above; the implicit/explicit
+    // `str` head stays elided — a field line with no type item has
+    // head type `str`.
+    else if !a.type_name.is_empty() && a.type_name != "str" && a.type_name != "map" {
+        items.insert(0, format!("!{}", a.type_name));
     } else if items.is_empty() {
         items.push("!str".into());
     }
@@ -727,6 +909,78 @@ fn lower_with_defaults(
         items.insert(0, "!str".into());
     }
     Ok((items, col.defaults))
+}
+
+/// The export-relevant base kind of a type — what a foreign format
+/// can carry natively. `Num` and `Bool` are the kinds JSON (and the
+/// exporters that walk the shared tree) represent as non-string
+/// scalars; everything else exports as the string the value already
+/// is. Distinct from validation: kinds are derived, best-effort
+/// interpretation for FOREIGN formats — kaiv itself needs none of
+/// this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportKind {
+    Num,
+    Bool,
+    Other,
+}
+
+/// The export kind of a named type, resolved through its `.taiv`
+/// definition chain (the same walk the schema compiler lowers with):
+/// a `..num` span means numeric, a lowered `{true,false}` enum means
+/// boolean. Unresolvable names are `Other` — exporters fall back to
+/// the string form rather than failing.
+pub(crate) fn resolved_kind(
+    name: &str,
+    resolver: &Resolver,
+    layer1: &[(String, String)],
+) -> ExportKind {
+    let a = Annotation {
+        type_name: name.to_string(),
+        ..Annotation::default()
+    };
+    let mut b = Buckets::default();
+    let mut col = Collected::default();
+    if bucket_annotation(&a, resolver, layer1, &mut b, &mut col, 0).is_err() {
+        return ExportKind::Other;
+    }
+    if b.spans.iter().any(|s| s == "..num" || s.starts_with("..num")) {
+        ExportKind::Num
+    } else if b.ranges.iter().any(|r| r == "{true,false}") {
+        ExportKind::Bool
+    } else {
+        ExportKind::Other
+    }
+}
+
+/// The export kind of a compiled schema field, read from its
+/// `.csaiv` items alone (no resolution): the retained core head
+/// (`!int`/`!float` → numeric, `!bool` → boolean), else the lowered
+/// constraints (`..num` span, `{true,false}` enum). The offline
+/// fallback for exporters — a device holding the `.csaiv` for
+/// validation already holds the base kinds.
+pub(crate) fn field_export_kind(items: &[Item]) -> ExportKind {
+    for i in items {
+        match i {
+            Item::Anno(a) if a.union.is_empty() => match a.type_name.as_str() {
+                "int" | "float" => return ExportKind::Num,
+                "bool" => return ExportKind::Bool,
+                _ => {}
+            },
+            Item::Constraint(Constraint::Span(sp))
+                if sp == "..num" || sp.starts_with("..num") =>
+            {
+                return ExportKind::Num;
+            }
+            Item::Constraint(Constraint::Enum(vs))
+                if vs.len() == 2 && vs.contains(&"true".into()) && vs.contains(&"false".into()) =>
+            {
+                return ExportKind::Bool;
+            }
+            _ => {}
+        }
+    }
+    ExportKind::Other
 }
 
 /// One union alternative in `.csaiv` form: the type name, plus a
@@ -969,6 +1223,107 @@ mod tests {
             compile_schema(b".!saiv 1 a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
         );
         assert!(compile_schema(b".!saiv 1 a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
+    }
+
+    #[test]
+    fn map_block_lowers_key_clause_and_bounds() {
+        // The D-2 ostensive surface: a `(/name)` block mirroring the
+        // data form — type annotation for entry values, a `/regex/`
+        // key line, bounds on the header — lowers to the § 7.5
+        // compiled form: collection line + entry line.
+        let out = compile_schema(
+            b".!saiv 1 acme/langs\n(/name min=1 max=40)\n!str\n/^[a-z]{2,3}(-[a-z0-9]{2,9})?$/=\n()\n",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            ".!csaiv 1 acme/langs\n\
+             /name [key::/^[a-z]{2,3}(-[a-z0-9]{2,9})?$/] [min=1] [max=40]\n\
+             !str'/name::=\n"
+        );
+        // Key grammar without bounds; typed entry values; under an
+        // enclosing namespace.
+        let out = compile_schema(
+            b".!saiv 1 acme/cfg\n(/config)\n(/settings max=100)\n!int\n/^[a-z][a-z0-9_]*$/=\n()\n()\n",
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            ".!csaiv 1 acme/cfg\n\
+             /config/settings [key::/^[a-z][a-z0-9_]*$/] [max=100]\n\
+             !int /^-?[0-9]+$/ ..num'/config/settings::=\n"
+        );
+        // The compiled form round-trips through the csaiv parser.
+        let sc = crate::validator::parse_csaiv(&out).unwrap();
+        assert_eq!(sc.collections.len(), 1);
+        assert_eq!(
+            sc.collections[0].header.key.as_deref(),
+            Some("^[a-z][a-z0-9_]*$")
+        );
+    }
+
+    #[test]
+    fn map_block_surface_violations_are_compile_errors() {
+        use crate::error::{LexError, LexErrorAt};
+        let ic = |line| {
+            Err(PipelineError::Lex(LexErrorAt {
+                error: LexError::InvalidConstraint,
+                line,
+            }))
+        };
+        // A literal key line inside a map block — a required named
+        // entry — is outside the D-2 scope: clear compile error.
+        assert_eq!(
+            compile_schema(
+                b".!saiv 1 a/m\n(/name min=1)\n!str\n/^[a-z]+$/=\ntimeout=30\n()\n"
+            ),
+            ic(5)
+        );
+        // Bounds on a block that never declares its key grammar.
+        assert_eq!(
+            compile_schema(b".!saiv 1 a/m\n(/name min=1)\n!str\nhost=\n()\n"),
+            ic(5)
+        );
+        // A key line beside ordinary members, or outside any block.
+        assert_eq!(
+            compile_schema(b".!saiv 1 a/m\n(/name)\nhost=\n/^[a-z]+$/=\n()\n"),
+            ic(4)
+        );
+        assert_eq!(compile_schema(b".!saiv 1 a/m\n/^[a-z]+$/=\n"), ic(2));
+        // The flat unkeyed form stays valid alongside.
+        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>\nsettings=\n").is_ok());
+    }
+
+    #[test]
+    fn malformed_lex_tag_is_a_static_compile_error() {
+        use crate::error::{LexError, LexErrorAt};
+        // D-8: BCP 47 well-formedness of a `..lex[tag]` locale is
+        // static and backend-independent — INVALID_CONSTRAINT at
+        // schema-compile time, never deferred to validation.
+        for bad in ["123", "de--phonebk", "toolongsubtag123", ""] {
+            let saiv = format!(".!saiv 1 a/l\n..lex[{bad}]\nname=\n");
+            assert_eq!(
+                compile_schema(saiv.as_bytes()),
+                Err(PipelineError::Lex(LexErrorAt {
+                    error: LexError::InvalidConstraint,
+                    line: 0,
+                })),
+                "{bad}"
+            );
+        }
+        // Well-formed tags compile — including an unknown language
+        // (zz: a validation-time CollationUnsupportedError) and the
+        // explicit root request.
+        for ok in ["zz", "und", "fr-CA", "de-DE-u-co-phonebk"] {
+            let saiv = format!(".!saiv 1 a/l\n..lex[{ok}]\nname=\n");
+            assert!(compile_schema(saiv.as_bytes()).is_ok(), "{ok}");
+        }
+        // The same check covers `.taiv` publish-time validation.
+        assert!(check_type_lib(
+            b".!taiv 1 acme/l\n\n/^.+$/ ..lex[123]\n&name=\n",
+            &dead_end()
+        )
+        .is_err());
     }
 
     #[test]

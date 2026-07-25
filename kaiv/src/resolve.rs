@@ -5,6 +5,14 @@
 //! default hosts). Without `net`, a lookup that would need the network
 //! is a `SchemaResolutionError`. `std/core` is embedded and never
 //! resolved.
+//!
+//! Every resolution records a [`ResolutionEvent`] (drained via
+//! [`Resolver::take_resolutions`]), and under strict mode
+//! (`Config::strict_registry`) a Layer 1 win is refused with
+//! `RegistryStrictError` — an untrusted document must not choose
+//! where its own contract comes from. Canonical mode
+//! (`Config::canonical_registry`) goes further: Layers 1–2 are
+//! ignored and everything resolves through the Layer 4 defaults.
 
 use crate::config::Config;
 use crate::error::{AppError, PipelineError};
@@ -13,6 +21,37 @@ use crate::taiv::{embedded, parse_taiv, TypeDef, TypeLib};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
+
+/// Which layer won an artifact resolution. `Layer2` covers both the
+/// `kaiv.kaiv` file and `KAIV_REGISTRY_*` environment overrides
+/// (merged into one map before resolution, so indistinguishable
+/// here). Layer 3 redirect aliasing happens transparently inside the
+/// HTTP fetch and is not reported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionLayer {
+    /// Host-injected bytes ([`Resolver::preload`]); outrank every base.
+    Preload,
+    /// Document-level `.!registry` declaration.
+    Layer1,
+    /// Build-time configuration (`kaiv.kaiv` / environment).
+    Layer2,
+    /// Default registry host.
+    Layer4,
+}
+
+/// Provenance record for one resolved artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionEvent {
+    /// Library path as referenced (e.g. `hub/invoice`).
+    pub lib: String,
+    /// Artifact extension (`taiv`, `faiv`, `saiv`, `csaiv`, `maiv`).
+    pub ext: String,
+    pub layer: ResolutionLayer,
+    /// The matched base (URL or filesystem path; empty for `Preload`).
+    pub base: String,
+    /// Full URL or filesystem path actually read (empty for `Preload`).
+    pub location: String,
+}
 
 #[derive(Default)]
 pub struct Resolver {
@@ -27,6 +66,9 @@ pub struct Resolver {
     /// Artifacts a lookup failed to obtain, for the host's
     /// fetch-and-retry loop.
     missing: RefCell<BTreeSet<(String, String)>>,
+    /// Provenance log: one event per artifact resolution (including
+    /// the Layer 1 event behind a strict-mode refusal).
+    events: RefCell<Vec<ResolutionEvent>>,
 }
 
 impl Resolver {
@@ -57,6 +99,12 @@ impl Resolver {
         std::mem::take(&mut *self.missing.borrow_mut())
             .into_iter()
             .collect()
+    }
+
+    /// Drain the provenance log: one [`ResolutionEvent`] per artifact
+    /// resolution so far, in resolution order.
+    pub fn take_resolutions(&self) -> Vec<ResolutionEvent> {
+        std::mem::take(&mut *self.events.borrow_mut())
     }
 
     /// Load and cache `lib` if needed. `layer1` is the document's
@@ -183,6 +231,13 @@ impl Resolver {
             .borrow()
             .get(&(lib.to_string(), ext.to_string()))
         {
+            self.events.borrow_mut().push(ResolutionEvent {
+                lib: lib.to_string(),
+                ext: ext.to_string(),
+                layer: ResolutionLayer::Preload,
+                base: String::new(),
+                location: String::new(),
+            });
             return Ok(bytes.clone());
         }
         let read = self.read_artifact_base(lib, layer1, ext);
@@ -194,6 +249,43 @@ impl Resolver {
         read
     }
 
+    /// The base layer cascade for `{lib}.{ext}`, without reading:
+    /// Layer 1 (`.!registry`) wins over Layer 2 (`kaiv.kaiv`, whose
+    /// `default` key wins over the Layer 4 default host). Canonical
+    /// mode consults Layer 4 alone — no declaration, configuration
+    /// file, or environment variable can redirect resolution. Strict
+    /// mode inverts Layers 1–2: the consumer's configuration shadows
+    /// the document's declaration for prefixes it covers, so that
+    /// vendoring via `kaiv.kaiv` is the sanctioned way to resolve a
+    /// document whose uncovered Layer 1 win would be refused.
+    fn select_base<'a>(
+        &'a self,
+        prefix: &str,
+        layer1: &'a [(String, String)],
+        ext: &str,
+    ) -> Option<(&'a str, ResolutionLayer)> {
+        if self.config.canonical_registry {
+            return layer4_default(ext).map(|b| (b, ResolutionLayer::Layer4));
+        }
+        let l1 = || {
+            layer1
+                .iter()
+                .find(|(p, _)| p == prefix)
+                .map(|(_, b)| (b.as_str(), ResolutionLayer::Layer1))
+        };
+        let l2 = || {
+            self.config
+                .base_for(prefix)
+                .map(|b| (b, ResolutionLayer::Layer2))
+        };
+        let base = if self.config.strict_registry {
+            l2().or_else(l1)
+        } else {
+            l1().or_else(l2)
+        };
+        base.or_else(|| layer4_default(ext).map(|b| (b, ResolutionLayer::Layer4)))
+    }
+
     /// Locate and read `{base}/{lib}.{ext}` via the base layers.
     fn read_artifact_base(
         &self,
@@ -202,16 +294,23 @@ impl Resolver {
         ext: &str,
     ) -> Result<Vec<u8>, PipelineError> {
         let prefix = lib.split('/').next().unwrap_or(lib);
-        // Layer 1 (.!registry) wins over Layer 2 (kaiv.kaiv).
-        // Layer 1 (.!registry) wins over Layer 2 (kaiv.kaiv, whose
-        // `default` key wins over the Layer 4 default host).
-        let base = layer1
-            .iter()
-            .find(|(p, _)| p == prefix)
-            .map(|(_, b)| b.as_str())
-            .or_else(|| self.config.base_for(prefix))
-            .or_else(|| layer4_default(ext))
+        let (base, layer) = self
+            .select_base(prefix, layer1, ext)
             .ok_or(PipelineError::App(AppError::SchemaResolution))?;
+        let mut event = ResolutionEvent {
+            lib: lib.to_string(),
+            ext: ext.to_string(),
+            layer,
+            base: base.to_string(),
+            location: String::new(),
+        };
+        if layer == ResolutionLayer::Layer1 && self.config.strict_registry {
+            // Strict mode: the document must not choose where its own
+            // contract comes from. Record the would-be resolution and
+            // refuse before any read or fetch.
+            self.events.borrow_mut().push(event);
+            return Err(PipelineError::App(AppError::RegistryStrict));
+        }
         if base.starts_with("http://") || base.starts_with("https://") {
             #[cfg(feature = "net")]
             {
@@ -221,12 +320,18 @@ impl Resolver {
                     .cache_dir
                     .clone()
                     .or_else(crate::net::default_cache_root);
-                return crate::net::fetch(&url, root.as_deref(), crate::net::env_offline());
+                let bytes = crate::net::fetch(&url, root.as_deref(), crate::net::env_offline())?;
+                event.location = url;
+                self.events.borrow_mut().push(event);
+                return Ok(bytes);
             }
             // Without the `net` feature, network resolution is
             // unimplemented (embedded/offline builds).
             #[cfg(not(feature = "net"))]
-            return Err(PipelineError::App(AppError::SchemaResolution));
+            {
+                let _ = event;
+                return Err(PipelineError::App(AppError::SchemaResolution));
+            }
         }
         let mut path = PathBuf::from(base);
         if path.is_relative() {
@@ -235,7 +340,11 @@ impl Resolver {
             }
         }
         path.push(format!("{lib}.{ext}"));
-        std::fs::read(&path).map_err(|_| PipelineError::App(AppError::SchemaResolution))
+        let bytes =
+            std::fs::read(&path).map_err(|_| PipelineError::App(AppError::SchemaResolution))?;
+        event.location = path.display().to_string();
+        self.events.borrow_mut().push(event);
+        Ok(bytes)
     }
 }
 
@@ -301,12 +410,151 @@ mod tests {
         Resolver::new(config)
     }
 
+    /// A temp directory holding `acme/net.taiv`, as a Layer 1/2 base.
+    fn temp_lib(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("kaiv-resolve-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("acme")).unwrap();
+        std::fs::write(dir.join("acme/net.taiv"), ACME_NET).unwrap();
+        dir
+    }
+
     #[test]
     fn preload_wins_over_bases() {
         let r = dead_end();
         r.preload("acme/net", "taiv", ACME_NET.to_vec());
         assert!(r.contains("acme/net", "proto", &[]).unwrap());
         assert!(!r.contains("acme/net", "absent", &[]).unwrap());
+        let events = r.take_resolutions();
+        assert_eq!(events.len(), 1); // second lookup hits the lib cache
+        assert_eq!(events[0].layer, ResolutionLayer::Preload);
+    }
+
+    #[test]
+    fn layer1_resolution_is_reported() {
+        let dir = temp_lib("layer1");
+        let r = dead_end();
+        let layer1 = vec![("acme".to_string(), dir.display().to_string())];
+        assert!(r.contains("acme/net", "proto", &layer1).unwrap());
+        let events = r.take_resolutions();
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!((ev.lib.as_str(), ev.ext.as_str()), ("acme/net", "taiv"));
+        assert_eq!(ev.layer, ResolutionLayer::Layer1);
+        assert_eq!(ev.base, dir.display().to_string());
+        assert!(ev.location.ends_with("net.taiv"));
+        // Drained: a second take starts empty.
+        assert!(r.take_resolutions().is_empty());
+    }
+
+    #[test]
+    fn strict_mode_refuses_layer1_before_reading() {
+        let r = Resolver::new(Config {
+            strict_registry: true,
+            ..Config::default()
+        });
+        // The base is a dead end: a read attempt would surface
+        // SchemaResolutionError, so RegistryStrictError proves the
+        // refusal came before any read.
+        let layer1 = vec![("acme".to_string(), "/nonexistent/kaiv-test".to_string())];
+        match r.contains("acme/net", "proto", &layer1) {
+            Err(PipelineError::App(AppError::RegistryStrict)) => {}
+            other => panic!("expected RegistryStrictError, got {other:?}"),
+        }
+        let events = r.take_resolutions();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].layer, ResolutionLayer::Layer1);
+        assert!(events[0].location.is_empty());
+    }
+
+    #[test]
+    fn strict_mode_leaves_dormant_layer1_and_layer2_alone() {
+        let dir = temp_lib("dormant");
+        let mut config = Config {
+            strict_registry: true,
+            ..Config::default()
+        };
+        config
+            .registries
+            .insert("acme".into(), dir.display().to_string());
+        let r = Resolver::new(config);
+        // The document's .!registry names a different prefix — a
+        // dormant declaration must not trip strict mode.
+        let layer1 = vec![("other".to_string(), "/nonexistent/kaiv-test".to_string())];
+        assert!(r.contains("acme/net", "proto", &layer1).unwrap());
+        let events = r.take_resolutions();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].layer, ResolutionLayer::Layer2);
+    }
+
+    #[test]
+    fn strict_mode_lets_vendored_layer2_shadow_layer1() {
+        let dir = temp_lib("vendored");
+        let mut config = Config {
+            strict_registry: true,
+            ..Config::default()
+        };
+        config
+            .registries
+            .insert("acme".into(), dir.display().to_string());
+        let r = Resolver::new(config);
+        // The document declares the same prefix the consumer has
+        // vendored — the consumer's configuration shadows it, so
+        // strict mode has nothing to refuse.
+        let layer1 = vec![("acme".to_string(), "/nonexistent/kaiv-test".to_string())];
+        assert!(r.contains("acme/net", "proto", &layer1).unwrap());
+        let events = r.take_resolutions();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].layer, ResolutionLayer::Layer2);
+    }
+
+    #[test]
+    fn canonical_mode_ignores_layers_1_and_2() {
+        let mut config = Config {
+            canonical_registry: true,
+            ..Config::default()
+        };
+        config.registries.insert("acme".into(), "/layer2".into());
+        let r = Resolver::new(config);
+        let layer1 = vec![("acme".to_string(), "/layer1".to_string())];
+        // Both overrides present; canonical mode still selects the
+        // Layer 4 default host.
+        let (base, layer) = r.select_base("acme", &layer1, "taiv").unwrap();
+        assert_eq!(layer, ResolutionLayer::Layer4);
+        assert_eq!(base, "https://t.kaiv.io");
+        // Preload (host-injected, not an override) still wins.
+        r.preload("acme/net", "taiv", ACME_NET.to_vec());
+        assert!(r.contains("acme/net", "proto", &layer1).unwrap());
+        assert_eq!(r.take_resolutions()[0].layer, ResolutionLayer::Preload);
+    }
+
+    #[test]
+    fn canonical_subsumes_strict() {
+        let r = Resolver::new(Config {
+            canonical_registry: true,
+            strict_registry: true,
+            ..Config::default()
+        });
+        let layer1 = vec![("acme".to_string(), "/layer1".to_string())];
+        // Layer 1 never wins under canonical mode, so strict mode
+        // has nothing to refuse.
+        let (_, layer) = r.select_base("acme", &layer1, "csaiv").unwrap();
+        assert_eq!(layer, ResolutionLayer::Layer4);
+    }
+
+    #[test]
+    fn strict_mode_allows_preload() {
+        let r = Resolver::new(Config {
+            strict_registry: true,
+            ..Config::default()
+        });
+        r.preload("acme/net", "taiv", ACME_NET.to_vec());
+        // Preload outranks Layer 1, so a registry-gate host keeps
+        // working under strict mode.
+        let layer1 = vec![("acme".to_string(), "/nonexistent/kaiv-test".to_string())];
+        assert!(r.contains("acme/net", "proto", &layer1).unwrap());
+        assert_eq!(r.take_resolutions()[0].layer, ResolutionLayer::Preload);
     }
 
     #[test]

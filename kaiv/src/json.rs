@@ -18,66 +18,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
-// ---------------------------------------------------------------- b64url
-
-const B64URL: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
-/// Base64url, unpadded (RFC 4648 §5) — the `!b64` variant.
-pub fn b64url_encode(data: &[u8]) -> String {
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        let sextets = [n >> 18, (n >> 12) & 63, (n >> 6) & 63, n & 63];
-        for (i, s) in sextets.iter().enumerate() {
-            if i <= chunk.len() {
-                out.push(B64URL[*s as usize] as char);
-            }
-        }
-    }
-    out
-}
-
-pub fn b64url_decode(s: &str) -> Option<Vec<u8>> {
-    fn val(c: u8) -> Option<u32> {
-        Some(match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            _ => return None,
-        } as u32)
-    }
-    let b = s.as_bytes();
-    if b.len() % 4 == 1 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(b.len() * 3 / 4);
-    for chunk in b.chunks(4) {
-        let mut n = 0u32;
-        for (i, &c) in chunk.iter().enumerate() {
-            n |= val(c)? << (18 - 6 * i);
-        }
-        // Non-canonical trailing bits (RFC 4648 §3.5) are tolerated by
-        // discarding them: the spec pins validation to the base64url
-        // SHAPE and nothing more, so the compiler and validator accept
-        // `aR` — an exporter rejecting it would break the pipeline's
-        // emit-what-you-accept closure.
-        out.push((n >> 16) as u8);
-        if chunk.len() >= 3 {
-            out.push((n >> 8) as u8);
-        }
-        if chunk.len() == 4 {
-            out.push(n as u8);
-        }
-    }
-    Some(out)
-}
+pub use crate::b64::{b64url_decode, b64url_encode};
 
 // ------------------------------------------------------------ JSON parse
 
@@ -960,9 +901,108 @@ pub fn export(canonical: &str) -> Result<String, PipelineError> {
     Ok(out)
 }
 
+/// Type-resolving export (SPEC.md § Exporters Resolve Custom Heads):
+/// like [`export`], but custom type heads on data lines are
+/// interpreted through their `.taiv` definition chain via the
+/// resolver — a head whose chain carries `..num` renders as a JSON
+/// number, a lowered `{true,false}` enum as a boolean. When a name
+/// does not resolve, the document's declared `.!schema` (when
+/// resolvable) supplies the field's lowered kind — a device holding
+/// the `.csaiv` for validation already holds the base kinds. A head
+/// neither source can interpret falls back to the string the value
+/// already is; nothing fails on resolution grounds.
+pub fn export_with(
+    canonical: &str,
+    resolver: &crate::resolve::Resolver,
+) -> Result<String, PipelineError> {
+    let ctx = ResolveCtx::new(canonical, resolver);
+    let root = tree_inner(canonical, Some(&ctx))?;
+    let mut out = String::new();
+    serialize(&root, &mut out);
+    out.push('\n');
+    Ok(out)
+}
+
+/// The shared resolving tree for the sibling exporters (yaml, toml,
+/// xml, cbor, avro, asn1, proto) — [`tree`]'s type-resolving twin.
+pub(crate) fn tree_resolved(
+    canonical: &str,
+    resolver: &crate::resolve::Resolver,
+) -> Result<Node, PipelineError> {
+    let ctx = ResolveCtx::new(canonical, resolver);
+    tree_inner(canonical, Some(&ctx))
+}
+
+/// Per-export resolution state: the document's Layer 1 registry
+/// overrides, a per-type-name kind cache, and the lazily-resolved
+/// declared schema (the offline fallback source).
+struct ResolveCtx<'a> {
+    canonical: &'a str,
+    resolver: &'a crate::resolve::Resolver,
+    layer1: Vec<(String, String)>,
+    kinds: std::cell::RefCell<std::collections::HashMap<String, crate::schema::ExportKind>>,
+    schema: std::cell::OnceCell<Option<crate::validator::CompiledSchema>>,
+}
+
+impl<'a> ResolveCtx<'a> {
+    fn new(canonical: &'a str, resolver: &'a crate::resolve::Resolver) -> Self {
+        let mut layer1 = Vec::new();
+        for raw in canonical.lines() {
+            let s = raw.trim_start_matches([' ', '\t']);
+            if let Some(rest) = s.strip_prefix(".!registry") {
+                if let Some((p, b)) = rest.trim_matches([' ', '\t']).split_once('=') {
+                    layer1.push((p.to_string(), b.to_string()));
+                }
+            }
+        }
+        ResolveCtx {
+            canonical,
+            resolver,
+            layer1,
+            kinds: Default::default(),
+            schema: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The export kind of a custom head at a namepath: the resolved
+    /// `.taiv` chain first (cached per name), the declared schema's
+    /// field second, `Other` when neither knows.
+    fn kind(&self, type_name: &str, namepath: &str) -> crate::schema::ExportKind {
+        use crate::schema::ExportKind;
+        let by_name = *self
+            .kinds
+            .borrow_mut()
+            .entry(type_name.to_string())
+            .or_insert_with(|| {
+                crate::schema::resolved_kind(type_name, self.resolver, &self.layer1)
+            });
+        if by_name != ExportKind::Other {
+            return by_name;
+        }
+        let schema = self.schema.get_or_init(|| {
+            crate::validator::schema_for_daiv(self.canonical, self.resolver)
+                .ok()
+                .flatten()
+        });
+        let Some(schema) = schema else {
+            return ExportKind::Other;
+        };
+        schema
+            .fields
+            .iter()
+            .find(|f| crate::validator::line_matches(f, namepath))
+            .map(|f| crate::schema::field_export_kind(&f.items))
+            .unwrap_or(ExportKind::Other)
+    }
+}
+
 /// Canonical kaiv text → the shared export tree all format exporters
 /// walk (JSON serializes it; YAML/TOML convert via node_to_val).
 pub(crate) fn tree(canonical: &str) -> Result<Node, PipelineError> {
+    tree_inner(canonical, None)
+}
+
+fn tree_inner(canonical: &str, ctx: Option<&ResolveCtx>) -> Result<Node, PipelineError> {
     let mut root = Node::Obj(Vec::new());
     for raw in canonical.lines() {
         let s = raw.trim_start_matches([' ', '\t']);
@@ -986,7 +1026,7 @@ pub(crate) fn tree(canonical: &str) -> Result<Node, PipelineError> {
         // truly verbatim (`$5` is a legal literal — the `$$` doubling
         // was collapsed at denormalization). Relational .raiv is
         // denormalized by the caller before it reaches an exporter.
-        let node = render_node(&a.type_name, value)?;
+        let node = render_node_at(&a.type_name, value, namepath, ctx)?;
         insert(&mut root, &segments(namepath)?, node)?;
     }
     Ok(root)
@@ -1092,6 +1132,44 @@ fn segments(np: &str) -> Result<Vec<Seg>, PipelineError> {
         return Err(err(format!("empty namepath: {np}")));
     }
     Ok(segs)
+}
+
+/// [`render_node`] plus the custom-head hook: a resolving context
+/// interprets library-path heads outside the built-in tables
+/// (`std/enc` keeps its embed semantics; `std/time` / `std/num`
+/// their typed nodes) as their resolved base kind. Interpretation is
+/// best-effort: a value that does not fit the resolved kind stays
+/// the string it is, never an error — resolution refines, it cannot
+/// reject.
+fn render_node_at(
+    type_name: &str,
+    value: &str,
+    namepath: &str,
+    ctx: Option<&ResolveCtx>,
+) -> Result<Node, PipelineError> {
+    if let Some(ctx) = ctx {
+        if type_name.contains('/')
+            && !type_name.starts_with("std/enc/")
+            && !type_name.starts_with("std/time/")
+            && !type_name.starts_with("std/num/")
+        {
+            match ctx.kind(type_name, namepath) {
+                crate::schema::ExportKind::Num => {
+                    let mut p = P { s: value, i: 0 };
+                    if p.number().is_ok() && p.i == value.len() {
+                        return Ok(Node::Leaf(value.to_string()));
+                    }
+                }
+                crate::schema::ExportKind::Bool => {
+                    if value == "true" || value == "false" {
+                        return Ok(Node::Leaf(value.to_string()));
+                    }
+                }
+                crate::schema::ExportKind::Other => {}
+            }
+        }
+    }
+    render_node(type_name, value)
 }
 
 fn render_node(type_name: &str, value: &str) -> Result<Node, PipelineError> {
@@ -1299,6 +1377,68 @@ fn serialize(node: &Node, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn export_with_resolves_custom_heads() {
+        use crate::resolve::Resolver;
+        let r = Resolver::offline();
+        r.preload(
+            "acme/net",
+            "taiv",
+            b".!taiv 1 acme/net\n\n!int[1,65535]\n&port=\n\n!bool\n&armed=\n\n/^[a-z-]+$/\n&label=\n"
+                .to_vec(),
+        );
+        let daiv = concat!(
+            ".!daiv\n",
+            "!acme/net/port'::port=8443\n",
+            "!acme/net/armed'::armed=true\n",
+            "!acme/net/label'::name=web-01\n",
+        );
+        // Plain export: custom heads stay strings (the pre-existing
+        // contract, unchanged).
+        let plain = super::export(daiv).unwrap();
+        assert!(plain.contains("\"port\":\"8443\""), "{plain}");
+        // Resolving export: the taiv chain supplies the base kinds.
+        let out = super::export_with(daiv, &r).unwrap();
+        assert!(out.contains("\"port\":8443"), "{out}");
+        assert!(out.contains("\"armed\":true"), "{out}");
+        // A string-derived custom head stays the string it is.
+        assert!(out.contains("\"name\":\"web-01\""), "{out}");
+    }
+
+    #[test]
+    fn export_with_falls_back_to_the_declared_schema() {
+        use crate::resolve::Resolver;
+        // No taiv anywhere — only the compiled schema the document
+        // declares (the offline embedded-device shape: the .csaiv is
+        // vendored for validation and supplies the base kinds).
+        let r = Resolver::offline();
+        r.preload(
+            "acme/gauge",
+            "csaiv",
+            b".!csaiv 1 acme/gauge\n!acme/gauge/level /^-?[0-9]+$/ ..num'::level=\n"
+                .to_vec(),
+        );
+        let daiv = ".!daiv\n.!schema:acme/gauge\n!acme/gauge/level'::level=7\n";
+        let out = super::export_with(daiv, &r).unwrap();
+        assert!(out.contains("\"level\":7"), "{out}");
+    }
+
+    #[test]
+    fn export_with_never_fails_on_resolution() {
+        use crate::resolve::Resolver;
+        let r = Resolver::offline();
+        // Unresolvable head: the string form, not an error.
+        let daiv = ".!daiv\n!nowhere/at/all'::x=5\n";
+        let out = super::export_with(daiv, &r).unwrap();
+        assert!(out.contains("\"x\":\"5\""), "{out}");
+        // Resolved-numeric head with a non-numeric value: resolution
+        // refines, it cannot reject — the string form again.
+        r.preload("acme/n", "taiv", b".!taiv 1 acme/n\n\n!int\n&count=\n".to_vec());
+        let daiv2 = ".!daiv\n!acme/n/count'::x=not-a-number\n";
+        let out2 = super::export_with(daiv2, &r).unwrap();
+        assert!(out2.contains("\"x\":\"not-a-number\""), "{out2}");
+    }
     use super::*;
 
     #[test]

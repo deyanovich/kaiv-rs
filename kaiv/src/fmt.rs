@@ -472,16 +472,12 @@ fn region_end(lines: &[crate::lexer::Line<'_>], start: usize) -> usize {
                     stack.push(true);
                 }
             }
-            LineKind::SectionClose => {
-                if stack.last() == Some(&true) {
-                    stack.pop();
-                }
+            LineKind::SectionClose if stack.last() == Some(&true) => {
+                stack.pop();
             }
             LineKind::NsOpen(_) => stack.push(false),
-            LineKind::NsClose => {
-                if stack.last() == Some(&false) {
-                    stack.pop();
-                }
+            LineKind::NsClose if stack.last() == Some(&false) => {
+                stack.pop();
             }
             _ => {}
         }
@@ -519,10 +515,8 @@ fn model_region(
     let mut metas: Vec<String> = Vec::new();
     for l in region {
         match &l.kind {
-            LineKind::Blank => {
-                if !matches!(nodes.last(), Some(Node::Gap) | None) {
-                    nodes.push(Node::Gap);
-                }
+            LineKind::Blank if !matches!(nodes.last(), Some(Node::Gap) | None) => {
+                nodes.push(Node::Gap);
             }
             LineKind::Comment(c) => nodes.push(Node::Comment(norm_comment("#", c))),
             LineKind::Doc(c) => nodes.push(Node::Comment(norm_comment("//", c))),
@@ -831,9 +825,9 @@ fn render(shebang: Option<String>, nodes: Vec<Node>) -> String {
                             // Only absorb if a same-destination field
                             // follows; otherwise the comment/gap
                             // belongs between groups.
-                            let mut ahead = it.clone();
+                            let ahead = it.clone();
                             let mut absorbable = false;
-                            while let Some(x) = ahead.next() {
+                            for x in ahead {
                                 match x {
                                     Node::Comment(_) | Node::Gap => continue,
                                     Node::Field(nf) => {
@@ -1156,8 +1150,22 @@ fn render_group(g: &Group) -> (Vec<String>, bool) {
 // ── public entry points ─────────────────────────────────────────
 
 /// Format an authored `.kaiv` stream into the standard style.
+/// The formatted document always opens with its format
+/// declaration: a bare `.!kaiv` (= version 1) is inserted when
+/// the input carries none — the formatter's output is the
+/// canonical authored form, and the canonical form declares
+/// itself.
 pub fn format_data(input: &str) -> Result<String, PipelineError> {
-    let (shebang, nodes) = parse_authored(input)?;
+    let (shebang, mut nodes) = parse_authored(input)?;
+    let has_decl = nodes
+        .iter()
+        .any(|n| matches!(n, Node::Raw(s) if s == ".!kaiv" || s.starts_with(".!kaiv ")));
+    if !has_decl {
+        if !matches!(nodes.first(), Some(Node::Gap) | None) {
+            nodes.insert(0, Node::Gap);
+        }
+        nodes.insert(0, Node::Raw(".!kaiv".into()));
+    }
     Ok(render(shebang, nodes))
 }
 
@@ -1205,8 +1213,21 @@ mod tests {
     }
 
     #[test]
-    fn env_file_passes_through() {
-        assert_eq!(fmt("HOST=localhost\nPORT=8080\n"), "HOST=localhost\nPORT=8080\n");
+    fn env_file_gains_the_declaration() {
+        // The formatter's output is the canonical authored form,
+        // and the canonical form declares itself — a decl-less
+        // env-style file gains `.!kaiv` up front. (An env file
+        // meant for dotenv consumers simply isn't run through
+        // `kaiv fmt`.)
+        assert_eq!(
+            fmt("HOST=localhost\nPORT=8080\n"),
+            ".!kaiv\n\nHOST=localhost\nPORT=8080\n"
+        );
+    }
+
+    #[test]
+    fn empty_document_formats_to_the_declaration() {
+        assert_eq!(fmt(""), ".!kaiv\n");
     }
 
     #[test]

@@ -28,6 +28,10 @@ pub struct Header {
     /// Pipe-joined clause groups, in authored order. Grouping is
     /// notational — every clause must hold independently.
     pub groups: Vec<Vec<Clause>>,
+    /// `[key::/regex/]` — the map key grammar (SPEC.md § Maps in the
+    /// Compiled Schema, Key constraints): every entry key must match.
+    /// Compiled map collection lines only; never on array tables.
+    pub key: Option<String>,
     pub min: Option<u64>,
     pub max: Option<u64>,
 }
@@ -202,13 +206,19 @@ fn parse_fk_path(s: &str) -> Option<(String, String)> {
 }
 
 /// Render the compiled clause part of a collection constraint line:
-/// groups in authored order (pipe-joined), then `[min=N]` `[max=M]`.
+/// the `[key::…]` clause first (SPEC.md § Maps in the Compiled
+/// Schema shows it leading the bounds), then groups in authored
+/// order (pipe-joined), then `[min=N]` `[max=M]`.
 pub fn render_compiled(h: &Header) -> String {
-    let mut parts: Vec<String> = h
-        .groups
-        .iter()
-        .map(|g| g.iter().map(render_clause).collect::<Vec<_>>().join("|"))
-        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(k) = &h.key {
+        parts.push(format!("[key::/{k}/]"));
+    }
+    parts.extend(
+        h.groups
+            .iter()
+            .map(|g| g.iter().map(render_clause).collect::<Vec<_>>().join("|")),
+    );
     if let Some(n) = h.min {
         parts.push(format!("[min={n}]"));
     }
@@ -240,11 +250,76 @@ fn render_clause(c: &Clause) -> String {
     }
 }
 
+/// Whitespace-split like [`tokens`], additionally keeping a
+/// `[key::/…/]` clause whole: its regex body may contain spaces,
+/// which are pattern content, not token boundaries. The body ends at
+/// its unescaped closing `/` (backslash-escape-aware, matching the
+/// pattern grammar).
+fn clause_tokens(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let (mut start, mut i, mut q) = (0usize, 0usize, false);
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                if q && b.get(i + 1) == Some(&b'"') {
+                    i += 1;
+                } else {
+                    q = !q;
+                }
+            }
+            b'[' if !q && s[i..].starts_with("[key::/") => {
+                i += 7;
+                let mut esc = false;
+                while i < b.len() {
+                    let c = b[i];
+                    i += 1;
+                    if esc {
+                        esc = false;
+                    } else if c == b'\\' {
+                        esc = true;
+                    } else if c == b'/' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            b' ' | b'\t' if !q => {
+                if start < i {
+                    out.push(&s[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    if start < b.len() {
+        out.push(&s[start..]);
+    }
+    out
+}
+
 /// Parse the clause part of a compiled collection constraint line
 /// (everything after the array path).
 pub fn parse_compiled(s: &str) -> Option<Header> {
     let mut h = Header::default();
-    for t in tokens(s) {
+    for t in clause_tokens(s) {
+        // The key clause is handled whole, before any `|` split — its
+        // regex body may contain the group separator literally.
+        if let Some(rest) = t.strip_prefix("[key::") {
+            let pat = rest.strip_suffix(']')?;
+            let items = crate::anno::parse_constraint_items(pat)?;
+            let [crate::anno::Item::Constraint(crate::anno::Constraint::Pattern(body))] =
+                items.as_slice()
+            else {
+                return None;
+            };
+            if h.key.replace(body.clone()).is_some() {
+                return None; // at most one key grammar per collection
+            }
+            continue;
+        }
         let mut group = Vec::new();
         for c in split_q(t, b'|') {
             let inner = c.strip_prefix('[')?.strip_suffix(']')?;
@@ -340,6 +415,26 @@ mod tests {
         assert!(parse_header(&["f=/@arr/name"]).is_none()); // no /*::
         assert!(parse_header(&["f=/arr/*::name"]).is_none()); // no @
         assert!(parse_header(&["min=1x"]).is_none()); // not digits, not a spec
-        assert!(parse_compiled("[key::/^a$/]").is_none()); // map key clauses: later
+    }
+
+    #[test]
+    fn key_clause_roundtrip() {
+        // The compiled map key clause (SPEC.md § Maps in the Compiled
+        // Schema): parses whole even when the regex body carries the
+        // token and group separators literally.
+        let h = parse_compiled("[key::/^[a-z][a-z0-9_]*$/] [max=100]").unwrap();
+        assert_eq!(h.key.as_deref(), Some("^[a-z][a-z0-9_]*$"));
+        assert_eq!(h.max, Some(100));
+        assert_eq!(
+            render_compiled(&h),
+            "[key::/^[a-z][a-z0-9_]*$/] [max=100]"
+        );
+        let h = parse_compiled("[key::/^(a b|c)$/] [min=1]").unwrap();
+        assert_eq!(h.key.as_deref(), Some("^(a b|c)$"));
+        assert_eq!(parse_compiled(&render_compiled(&h)).unwrap(), h);
+        // Malformed key clauses reject.
+        assert!(parse_compiled("[key::^a$]").is_none()); // not a /…/ pattern
+        assert!(parse_compiled("[key::/a/ /b/]").is_none()); // two patterns
+        assert!(parse_compiled("[key::/a/] [key::/b/]").is_none()); // duplicate
     }
 }

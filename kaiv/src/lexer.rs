@@ -236,13 +236,22 @@ fn classify<'a>(
         if let Some(inner) = rest.strip_suffix(')') {
             // The ns-path token must satisfy `"/" step *( "/" step )`;
             // a missing leading `/` or bad segment is INVALID_KEY. The
-            // only clause the grammar admits after the path is
-            // `schema:` (rejected later by the compilers) — any other
-            // trailing token is off-grammar and must not vanish
-            // silently.
+            // clauses the grammar admits after the path: `schema:`
+            // (rejected later by the compilers), and — in `.saiv`
+            // only — the `min=`/`max=` entry-count bounds of a map
+            // block header (SPEC.md § Maps in the Compiled Schema,
+            // the D-2 authored surface), the same reserved words
+            // table-block headers carry. Any other trailing token is
+            // off-grammar and must not vanish silently.
+            let bound_ok = |t: &str| {
+                kind == FileKind::Schema
+                    && t.strip_prefix("min=")
+                        .or_else(|| t.strip_prefix("max="))
+                        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            };
             let toks = crate::table::tokens(inner);
             if !toks.first().is_some_and(|p| valid_ns_path(p))
-                || !toks[1..].iter().all(|t| t.starts_with("schema:"))
+                || !toks[1..].iter().all(|t| t.starts_with("schema:") || bound_ok(t))
             {
                 return Err(LexErrorAt {
                     error: LexError::InvalidKey,
@@ -270,6 +279,27 @@ fn classify<'a>(
             error: LexError::InvalidConstraint,
             line: no,
         });
+    }
+    // A map-block key line (`.saiv`): the entire left side is one
+    // `/regex/` in key position — the map key grammar — with nothing
+    // after `=` (SPEC.md § Maps in the Compiled Schema, the D-2
+    // authored surface). Parsed whole-line here because the regex
+    // body may contain `=`, which would derail the rule-5 split.
+    if kind == FileKind::Schema && s.starts_with('/') {
+        if let Some(head) = s.strip_suffix('=') {
+            let single_pattern = crate::anno::parse_constraint_items(head).is_some_and(|items| {
+                matches!(
+                    items.as_slice(),
+                    [crate::anno::Item::Constraint(crate::anno::Constraint::Pattern(_))]
+                )
+            });
+            if single_pattern {
+                return Ok(LineKind::Content {
+                    left: head,
+                    value: "",
+                });
+            }
+        }
     }
     if let Some(i) = split_index(s) {
         let left = s[..i].trim_end_matches([' ', '\t']);
@@ -696,7 +726,7 @@ pub(crate) fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), Lex
 }
 
 /// Split a path on `/` outside quoted names (`""` doubling aware).
-fn split_slash(p: &str) -> Vec<&str> {
+pub(crate) fn split_slash(p: &str) -> Vec<&str> {
     let b = p.as_bytes();
     let mut segs = Vec::new();
     let mut in_quote = false;

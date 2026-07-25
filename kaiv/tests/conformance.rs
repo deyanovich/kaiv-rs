@@ -15,13 +15,68 @@ fn conformance_dir() -> PathBuf {
 /// A vector directory may carry its own `kaiv.kaiv` (plus a local
 /// registry tree) — the offline Layer 1/2 resolution surface. This is
 /// also the config-bootstrap test: the harness parses the config with
-/// the core pipeline before resolving anything.
+/// the core pipeline before resolving anything. A `MODE` marker file
+/// names a resolution mode the runner must enable (per the
+/// conformance README): `registry-strict` or `registry-canonical`.
 fn resolver_for(dir: &Path) -> kaiv::Resolver {
     let cfg = dir.join("kaiv.kaiv");
-    if cfg.exists() {
-        kaiv::Resolver::new(kaiv::Config::load(&cfg).unwrap())
+    let mut config = if cfg.exists() {
+        kaiv::Config::load(&cfg).unwrap()
     } else {
-        kaiv::Resolver::offline()
+        kaiv::Config::default()
+    };
+    match fs::read_to_string(dir.join("MODE")) {
+        Ok(m) => match m.trim() {
+            "registry-strict" => config.strict_registry = true,
+            "registry-canonical" => config.canonical_registry = true,
+            other => panic!("{}: unknown MODE {other:?}", dir.display()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => panic!("{}: cannot read MODE: {e}", dir.display()),
+    }
+    kaiv::Resolver::new(config)
+}
+
+/// Is this build's collation backend the full reference (ICU, every
+/// locale and `-u-` override the spec recognizes)? Level 3 vectors
+/// run unconditionally under it; other builds gate on the LEVEL
+/// marker below.
+const FULL_COLLATION: bool = cfg!(feature = "collation-icu");
+
+/// The `LEVEL` marker file (conformance README): one line naming the
+/// minimum Level the vector requires. Only `3` exists today; an
+/// unknown value fails loudly rather than mis-gating the vector.
+fn requires_level3(dir: &Path) -> bool {
+    match fs::read_to_string(dir.join("LEVEL")) {
+        Ok(s) => match s.trim() {
+            "3" => true,
+            other => panic!("{}: unknown LEVEL {other:?}", dir.display()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => panic!("{}: cannot read LEVEL: {e}", dir.display()),
+    }
+}
+
+/// Level gating for a vector directory, per the conformance README:
+/// under the full ICU backend every vector runs as written
+/// (`Run`); a partial or absent backend runs a LEVEL-3 vector's
+/// validate cases against `partial.expected` when the vector
+/// carries it (the D-7 honest-partial rule: reject exactly, never
+/// order differently), and skips the vector otherwise.
+enum Gate {
+    Run,
+    Partial(String),
+    Skip,
+}
+
+fn gate(dir: &Path) -> Gate {
+    if !requires_level3(dir) || FULL_COLLATION {
+        return Gate::Run;
+    }
+    match fs::read_to_string(dir.join("partial.expected")) {
+        Ok(s) => Gate::Partial(s.trim().to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Gate::Skip,
+        Err(e) => panic!("{}: cannot read partial.expected: {e}", dir.display()),
     }
 }
 
@@ -58,6 +113,9 @@ fn subdirs(p: &Path) -> Vec<PathBuf> {
 fn valid_vectors() {
     let mut failures = Vec::new();
     for dir in subdirs(&conformance_dir().join("valid")) {
+        if requires_level3(&dir) && !FULL_COLLATION {
+            continue;
+        }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let input = fs::read(dir.join("input.kaiv")).unwrap();
         let expected_daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
@@ -105,6 +163,11 @@ fn valid_vectors() {
 fn schema_vectors() {
     let mut failures = Vec::new();
     for dir in subdirs(&conformance_dir().join("schema")) {
+        let partial = match gate(&dir) {
+            Gate::Run => None,
+            Gate::Partial(e) => Some(e),
+            Gate::Skip => continue,
+        };
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let saiv = fs::read(dir.join("schema.saiv")).unwrap();
         let expected_csaiv = fs::read_to_string(dir.join("expected.csaiv")).unwrap();
@@ -154,10 +217,16 @@ fn schema_vectors() {
         for case in cases {
             let cname = case.file_stem().unwrap().to_string_lossy().to_string();
             let daiv = fs::read_to_string(&case).unwrap();
-            let want = fs::read_to_string(case.with_extension("expected"))
-                .unwrap()
-                .trim()
-                .to_string();
+            // An honest-partial (or absent) collation backend expects
+            // the vector's partial outcome for every case in place of
+            // the per-case expectation (the D-7 rule).
+            let want = match &partial {
+                Some(e) => e.clone(),
+                None => fs::read_to_string(case.with_extension("expected"))
+                    .unwrap()
+                    .trim()
+                    .to_string(),
+            };
             let got = match kaiv::validate(&daiv, &schema) {
                 Ok(()) => "pass".to_string(),
                 Err(e) => e.error.name().to_string(),
@@ -190,6 +259,9 @@ fn compile_error_vectors() {
     let root = conformance_dir().join("compile-error");
     let mut failures = Vec::new();
     for dir in subdirs(&root) {
+        if requires_level3(&dir) && !FULL_COLLATION {
+            continue;
+        }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let want = fs::read_to_string(dir.join("expected.error"))
             .unwrap()
@@ -225,6 +297,9 @@ fn compile_error_vectors() {
 fn invalid_vectors() {
     let mut failures = Vec::new();
     for dir in subdirs(&conformance_dir().join("invalid")) {
+        if requires_level3(&dir) && !FULL_COLLATION {
+            continue;
+        }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let (path, kind) = if dir.join("input.kaiv").exists() {
             (dir.join("input.kaiv"), kaiv::FileKind::Data)
@@ -256,6 +331,9 @@ fn fmt_preserves_compilation() {
     // formatter is idempotent.
     let mut failures = Vec::new();
     for dir in subdirs(&conformance_dir().join("valid")) {
+        if requires_level3(&dir) && !FULL_COLLATION {
+            continue;
+        }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let input = fs::read_to_string(dir.join("input.kaiv")).unwrap();
         let expected_raiv = {
@@ -303,6 +381,9 @@ fn lift_round_trips() {
     // reproduces the identical .daiv.
     let mut failures = Vec::new();
     for dir in subdirs(&conformance_dir().join("valid")) {
+        if requires_level3(&dir) && !FULL_COLLATION {
+            continue;
+        }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
         let resolver = resolver_for(&dir);

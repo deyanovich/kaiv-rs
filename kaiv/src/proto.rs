@@ -48,9 +48,29 @@ pub fn export(
     schema: &str,
     message: Option<&str>,
 ) -> Result<Vec<u8>, PipelineError> {
+    export_tree(json::tree(canonical)?, schema, message)
+}
+
+/// Type-resolving export: [`export`] with custom heads interpreted
+/// through the resolver / the declared schema (see
+/// [`json::export_with`](crate::json::export_with)).
+pub fn export_with(
+    canonical: &str,
+    schema: &str,
+    message: Option<&str>,
+    resolver: &crate::resolve::Resolver,
+) -> Result<Vec<u8>, PipelineError> {
+    export_tree(json::tree_resolved(canonical, resolver)?, schema, message)
+}
+
+fn export_tree(
+    tree: json::Node,
+    schema: &str,
+    message: Option<&str>,
+) -> Result<Vec<u8>, PipelineError> {
     let reg = parse_proto(schema)?;
     let mi = pick_message(&reg, message)?;
-    let root = node_to_val(&json::tree(canonical)?)?;
+    let root = node_to_val(&tree)?;
     let mut out = Vec::new();
     encode_msg(&root, mi, &reg, &mut out, 0)?;
     Ok(out)

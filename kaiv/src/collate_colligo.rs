@@ -61,6 +61,14 @@ fn build(tag: &str) -> Option<Collator> {
     if parts.any(|p| p.len() == 1 && !p.eq_ignore_ascii_case("x")) {
         return None;
     }
+    // `..lex[und]` is the explicit request for root collation (the
+    // D-8 ruling): colligo's infallible root — the pure base table —
+    // at the same pinned case mode.
+    if tag.eq_ignore_ascii_case("und") {
+        let mut root = Collator::root();
+        root.set_case_mode(CaseMode::LowerFirst);
+        return Some(root);
+    }
     let collator = Collator::builder(tag)
         .case_mode(CaseMode::LowerFirst) // UCA tertiary default
         .build()
@@ -132,5 +140,10 @@ mod tests {
         // The ICU-identical Russian variant rides -x- private use.
         assert!(resolves("ru-x-icu"));
         assert!(resolves("de"));
+        // D-8: a well-formed unknown language rejects (no silent
+        // root fallback); explicit `und` is the legal spelling for
+        // root collation and resolves to colligo's root table.
+        assert!(!resolves("zz"));
+        assert!(resolves("und"));
     }
 }

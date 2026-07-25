@@ -264,9 +264,11 @@ pub fn schema_for_daiv(
         let bytes = resolver.csaiv_bytes(reference, &layer1)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| PipelineError::Other(format!("{reference}.csaiv is not UTF-8")))?;
-        let element_wise = qualifier
-            .as_deref()
-            .is_some_and(|q| q.split('/').next_back().is_some_and(|s| s.starts_with('@')));
+        let element_wise = qualifier.as_deref().is_some_and(|q| {
+            crate::lexer::split_slash(q)
+                .last()
+                .is_some_and(|s| s.starts_with('@'))
+        });
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -292,17 +294,17 @@ pub fn schema_for_daiv(
     parse_csaiv_inner(&text).map(Some)
 }
 
-struct DataLine {
-    type_name: String,
-    unit: Option<String>,
-    provenance: Option<String>,
-    namepath: String,
-    value: String,
+pub(crate) struct DataLine {
+    pub(crate) type_name: String,
+    pub(crate) unit: Option<String>,
+    pub(crate) provenance: Option<String>,
+    pub(crate) namepath: String,
+    pub(crate) value: String,
     /// 1-based source line in the `.daiv` input, for error context.
-    line: usize,
+    pub(crate) line: usize,
 }
 
-fn parse_daiv(text: &str) -> Result<Vec<DataLine>, PipelineError> {
+pub(crate) fn parse_daiv(text: &str) -> Result<Vec<DataLine>, PipelineError> {
     let mut out = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let s = raw.trim_start_matches([' ', '\t']);
@@ -512,29 +514,78 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
 
 /// Level 2 collection constraints. Cardinality is a Pass 1 concern
 /// (O(1) counters, checked on scan completion) and fires before the
-/// O(N) Pass 2 table-constraint check (SPEC.md § Validation).
+/// O(N) Pass 2 table-constraint check (SPEC.md § Validation). A map
+/// collection line (no `@` step — entry lines, not element groups)
+/// carries entry-count bounds and the optional `[key::…]` grammar
+/// (SPEC.md § Maps in the Compiled Schema).
 fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppErrorAt> {
-    let colls: Vec<(&Collection, Vec<HashMap<&str, &str>>)> = colls
+    let (maps, arrays): (Vec<&Collection>, Vec<&Collection>) = colls
         .iter()
-        .map(|c| (c, elements(data, &c.array)))
-        .collect();
-    for (coll, els) in &colls {
-        let n = els.len() as u64;
+        .partition(|c| find_unquoted(&c.array, "@").is_none());
+    let bounds_err = |coll: &Collection, n: u64, what: &str| {
+        let bounds = match (coll.header.min, coll.header.max) {
+            (Some(lo), Some(hi)) => format!("min={lo} max={hi}"),
+            (Some(lo), None) => format!("min={lo}"),
+            (None, Some(hi)) => format!("max={hi}"),
+            (None, None) => unreachable!(),
+        };
+        at(
+            AppError::CardinalityViolation,
+            0,
+            format!("{} has {n} {what}, schema requires {bounds}", coll.array),
+        )
+    };
+    // Map entry counts are Pass 1 cardinality like array element
+    // counts; the key grammar is a per-entry constraint.
+    for coll in &maps {
+        let entries = map_entries(data, &coll.array);
+        let n = entries.len() as u64;
         if coll.header.min.is_some_and(|m| n < m) || coll.header.max.is_some_and(|m| n > m) {
-            let bounds = match (coll.header.min, coll.header.max) {
-                (Some(lo), Some(hi)) => format!("min={lo} max={hi}"),
-                (Some(lo), None) => format!("min={lo}"),
-                (None, Some(hi)) => format!("max={hi}"),
-                (None, None) => unreachable!(),
-            };
-            return Err(at(
-                AppError::CardinalityViolation,
-                0,
-                format!("{} has {n} elements, schema requires {bounds}", coll.array),
-            ));
+            return Err(bounds_err(coll, n, "entries"));
         }
     }
-    for (coll, els) in &colls {
+    let arrays: Vec<(&Collection, Vec<HashMap<&str, &str>>)> = arrays
+        .into_iter()
+        .map(|c| (c, elements(data, &c.array)))
+        .collect();
+    for (coll, els) in &arrays {
+        // A namespace array counts element groups; a scalar array's
+        // elements are `{arr}::N` lines with no group to collect. A
+        // well-formed document only ever populates one of the two.
+        let n = els.len() as u64 + scalar_element_count(data, &coll.array);
+        if coll.header.min.is_some_and(|m| n < m) || coll.header.max.is_some_and(|m| n > m) {
+            return Err(bounds_err(coll, n, "elements"));
+        }
+    }
+    for coll in &maps {
+        let Some(pat) = &coll.header.key else { continue };
+        let re = Regex::new(pat).ok_or_else(|| {
+            at(
+                AppError::ConstraintViolation,
+                0,
+                format!("{}: key pattern outside the dialect: /{pat}/", coll.array),
+            )
+        })?;
+        for d in map_entries(data, &coll.array) {
+            // The grammar constrains the *name*: a quoted key is
+            // matched on its content, with the `""` doubling undone
+            // (quoting is spelling, not identity — SPEC.md § Quoted
+            // Names).
+            let spelled = &d.namepath[coll.array.len() + 2..];
+            let key = unquote_name(spelled);
+            if !re.is_match(&key) {
+                return Err(at(
+                    AppError::ConstraintViolation,
+                    d.line,
+                    format!(
+                        "{}: entry key {spelled} does not match the key pattern /{pat}/",
+                        coll.array
+                    ),
+                ));
+            }
+        }
+    }
+    for (coll, els) in &arrays {
         for clause in coll.header.groups.iter().flatten() {
             match clause {
                 Clause::Unique(fields) => {
@@ -602,6 +653,31 @@ fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppE
     Ok(())
 }
 
+/// A map's entry lines: data lines of the shape `{ns}::{key}` where
+/// the key is exactly one terminal name — the same flatness rule
+/// [`line_matches`] applies during the scan.
+fn map_entries<'a>(data: &'a [DataLine], ns: &str) -> Vec<&'a DataLine> {
+    let prefix = format!("{ns}::");
+    data.iter()
+        .filter(|d| {
+            d.namepath.strip_prefix(&prefix).is_some_and(|key| {
+                !key.is_empty()
+                    && (crate::compiler::is_quoted_name(key)
+                        || (!key.contains('"') && !key.contains('/') && !key.contains("::")))
+            })
+        })
+        .collect()
+}
+
+/// A name's content: a quoted spelling loses its quotes and the `""`
+/// doubling; a bare spelling is itself.
+fn unquote_name(s: &str) -> String {
+    match s.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => s.to_string(),
+    }
+}
+
 /// Group an array's element lines (`{arr}/{i}::{field}`) into
 /// per-element field maps, in index order — the flat-stream
 /// reconstruction of "for each element" (SPEC.md § Reconstructing
@@ -619,6 +695,20 @@ fn elements<'a>(data: &'a [DataLine], arr: &str) -> Vec<HashMap<&'a str, &'a str
         }
     }
     by_idx.into_values().collect()
+}
+
+/// Scalar-array element lines (`{arr}::N`) — the counterpart of
+/// [`elements`] for arrays declared with the vector operator, whose
+/// elements are indexed values rather than field groups.
+fn scalar_element_count(data: &[DataLine], arr: &str) -> u64 {
+    let prefix = format!("{arr}::");
+    data.iter()
+        .filter(|d| {
+            d.namepath
+                .strip_prefix(prefix.as_str())
+                .is_some_and(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .count() as u64
 }
 
 /// `.!provenance` enforcement, per data line. The grammar attaches a
@@ -768,22 +858,48 @@ pub(crate) fn split_element<'a>(np: &'a str, prefix: &str) -> Option<(usize, &'a
     Some((idx.parse().ok()?, field))
 }
 
+/// Does the namepath contain `needle` outside quoted names? A quoted
+/// segment may contain any byte literally (SPEC.md § Quoted Names),
+/// so structural markers (`@`, `/::`) count only unquoted.
+fn find_unquoted(s: &str, needle: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let n = needle.as_bytes();
+    let mut q = false;
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                if q && b.get(i + 1) == Some(&b'"') {
+                    i += 1;
+                } else {
+                    q = !q;
+                }
+            }
+            _ if !q && b[i..].starts_with(n) => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// A compiled map-entry line: empty-terminal namepath (`…::`) with no
 /// `@` in the steps.
 pub(crate) fn is_map_entry(f: &SchemaField) -> bool {
-    f.namepath.ends_with("::") && !f.namepath.contains('@')
+    f.namepath.ends_with("::") && find_unquoted(&f.namepath, "@").is_none()
 }
 
 /// A compiled scalar-array element line: empty-terminal namepath with
 /// an `@` step (`/@ports::`); the constraint applies to every index.
 pub(crate) fn scalar_arr_prefix(f: &SchemaField) -> Option<&str> {
-    (f.namepath.ends_with("::") && f.namepath.contains('@')).then_some(f.namepath.as_str())
+    (f.namepath.ends_with("::") && find_unquoted(&f.namepath, "@").is_some())
+        .then_some(f.namepath.as_str())
 }
 
 /// A compiled namespace-array element field line: the elided-index
 /// namepath `{arr}/::{field}`.
 pub(crate) fn ns_arr_parts(f: &SchemaField) -> Option<(&str, &str)> {
-    let i = f.namepath.find("/::")?;
+    let i = find_unquoted(&f.namepath, "/::")?;
     Some((&f.namepath[..i], &f.namepath[i + 3..]))
 }
 
@@ -860,6 +976,34 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
                     if d.value.contains("|:|") {
                         return Err(AppError::DelimiterCollision);
                     }
+                    Some(&a.constraints)
+                } else if a.union.is_empty()
+                    && a.type_name != "str"
+                    && a.type_name != "null"
+                    && d.type_name != "null"
+                    && a.type_name != "text"
+                    && d.type_name != "text"
+                    && !a.type_name.starts_with("std/enc/")
+                    && !d.type_name.starts_with("std/enc/")
+                {
+                    // A retained non-union head (SPEC.md § Head-Type
+                    // Retention) checks STRUCTURALLY, as the same
+                    // field did before retention: the head's
+                    // constraint group governs the value whatever
+                    // the data line's own name says — `!str` (the
+                    // pre-lift authored form, which the schema-aware
+                    // Denormalizer lifts) and a chain-compatible
+                    // name (`!int` under `!std/net/port`) both
+                    // apply. Nominal matching remains where the NAME
+                    // is the semantics: unions (the discriminant),
+                    // `null` (payload-free by type), `text` (the
+                    // `|:|` export interpretation; its one coercion
+                    // is the guarded str→text above), and the
+                    // `std/enc` embed channel (embedded payloads
+                    // never satisfy plain fields, and vice versa)
+                    // — and the explicit identity head `!str`, the
+                    // raw-string declaration, which admits only
+                    // `str`-typed lines.
                     Some(&a.constraints)
                 } else {
                     a.union
@@ -972,11 +1116,141 @@ fn range_ok(span: &str, value: &str, lo: Option<&str>, hi: Option<&str>) -> bool
         // Dotted version order: segment-wise numeric, not lexical, so
         // 1.10.0 > 1.9.0 (SPEC.md § The ..ver span).
         "..ver" => lo.is_none_or(|l| ver_le(l, value)) && hi.is_none_or(|h| ver_le(value, h)),
-        // ..lex byte order; ..time (ISO 8601) compares correctly as
-        // strings within a fixed offset — full temporal semantics are a
-        // Level 3+ concern beyond this seed.
+        // Chronological order: RFC 3339 operands compare as *instants*
+        // (offset-aware), so 2025-12-31T23:00:00+01:00 equals
+        // 2026-01-01T00:00:00+02:00 (SPEC.md § Span Orderings; the
+        // D-4 ruling). Off-shape operands fall back to byte order.
+        "..time" => lo.is_none_or(|l| time_le(l, value)) && hi.is_none_or(|h| time_le(value, h)),
+        // ..lex byte order.
         _ => lo.is_none_or(|l| value >= l) && hi.is_none_or(|h| value <= h),
     }
+}
+
+/// `a <= b` chronologically when both operands parse as RFC 3339
+/// shapes; byte comparison otherwise (schema patterns keep a field's
+/// values in one shape, so mixed-shape operands are off-contract
+/// anyway and byte order at least stays deterministic).
+fn time_le(a: &str, b: &str) -> bool {
+    match (time_instant(a), time_instant(b)) {
+        (Some(x), Some(y)) => x <= y,
+        _ => a <= b,
+    }
+}
+
+/// The instant an RFC 3339 / std-time value denotes, as
+/// (seconds, nanoseconds) on a common axis. Accepts the four
+/// `std/time` shapes: offset date-time, local date-time (no offset —
+/// placed on the axis as-if UTC), local date (midnight), local time
+/// (day zero). Constant memory: a fixed-size scan of the input, no
+/// allocation. `None` for anything off-shape.
+fn time_instant(s: &str) -> Option<(i64, u32)> {
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    // Exactly n digits at the cursor.
+    fn num(b: &[u8], i: &mut usize, n: usize) -> Option<i64> {
+        let end = i.checked_add(n)?;
+        if end > b.len() || !b[*i..end].iter().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        let mut v = 0i64;
+        for &c in &b[*i..end] {
+            v = v * 10 + (c - b'0') as i64;
+        }
+        *i = end;
+        Some(v)
+    }
+    fn expect(b: &[u8], i: &mut usize, c: u8) -> Option<()> {
+        if b.get(*i) == Some(&c) {
+            *i += 1;
+            Some(())
+        } else {
+            None
+        }
+    }
+    // Date part (optional: a bare local time has none).
+    let mut days = 0i64;
+    let mut has_date = false;
+    if b.len() >= 10 && b[4] == b'-' {
+        let y = num(b, &mut i, 4)?;
+        expect(b, &mut i, b'-')?;
+        let m = num(b, &mut i, 2)?;
+        expect(b, &mut i, b'-')?;
+        let d = num(b, &mut i, 2)?;
+        if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+            return None;
+        }
+        days = days_from_civil(y, m, d);
+        has_date = true;
+        if i == b.len() {
+            return Some((days * 86400, 0)); // local date: midnight
+        }
+        // RFC 3339 `T`/`t`; the std/time patterns also admit a space.
+        if !matches!(b.get(i), Some(b'T' | b't' | b' ')) {
+            return None;
+        }
+        i += 1;
+    }
+    // Time part.
+    let h = num(b, &mut i, 2)?;
+    expect(b, &mut i, b':')?;
+    let mi = num(b, &mut i, 2)?;
+    expect(b, &mut i, b':')?;
+    let sec = num(b, &mut i, 2)?;
+    // 23:59:60 leap seconds pass the shape check; they order after
+    // :59 within their minute, which is the correct relative order.
+    if h > 23 || mi > 59 || sec > 60 {
+        return None;
+    }
+    let mut nanos = 0u32;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        let start = i;
+        let mut scale = 100_000_000u32;
+        while i < b.len() && b[i].is_ascii_digit() {
+            // Digits past nanosecond precision are ordered-ignored
+            // (constant memory beats sub-nano discrimination).
+            if scale > 0 {
+                nanos += (b[i] - b'0') as u32 * scale;
+                scale /= 10;
+            }
+            i += 1;
+        }
+        if i == start {
+            return None; // a bare trailing dot is off-shape
+        }
+    }
+    let mut secs = days * 86400 + h * 3600 + mi * 60 + sec;
+    // Offset (only meaningful after a date-time).
+    match b.get(i) {
+        None => {}
+        Some(b'Z' | b'z') if has_date && i + 1 == b.len() => {}
+        Some(sign @ (b'+' | b'-')) if has_date => {
+            i += 1;
+            let oh = num(b, &mut i, 2)?;
+            expect(b, &mut i, b':')?;
+            let om = num(b, &mut i, 2)?;
+            if i != b.len() || oh > 23 || om > 59 {
+                return None;
+            }
+            let off = oh * 3600 + om * 60;
+            secs += if *sign == b'+' { -off } else { off };
+        }
+        Some(_) => return None,
+    }
+    Some((secs, nanos))
+}
+
+/// Days between a civil date and 1970-01-01 (Howard Hinnant's
+/// days-from-civil, integer-exact over the whole proleptic
+/// Gregorian range a 4-digit year can spell).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
 }
 
 /// `a <= b` by dotted numeric version segments; a shorter prefix
@@ -1073,6 +1347,36 @@ mod tests {
             err.context,
             "declared field /server::port missing at end of document"
         );
+    }
+
+    #[test]
+    fn strict_mode_blocks_document_registry_schema() {
+        use crate::config::Config;
+        let dir =
+            std::env::temp_dir().join(format!("kaiv-validator-strict-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("hub")).unwrap();
+        std::fs::write(dir.join("hub/x.csaiv"), ".!csaiv 1 hub/x\n!str'::a=\n").unwrap();
+        // The document steers its own .!schema resolution to a base
+        // it names — the strict-mode threat shape.
+        let daiv = format!(
+            ".!daiv\n.!schema:hub/x\n.!registry hub={}\n!str'::a=hi\n",
+            dir.display()
+        );
+        // Non-strict: the Layer 1 declaration resolves and validates.
+        let r = Resolver::new(Config::default());
+        let schema = schema_for_daiv(&daiv, &r).unwrap().unwrap();
+        assert!(validate(&daiv, &schema).is_ok());
+        // Strict: the same document is refused.
+        let r = Resolver::new(Config {
+            strict_registry: true,
+            ..Config::default()
+        });
+        match schema_for_daiv(&daiv, &r) {
+            Err(PipelineError::App(AppError::RegistryStrict)) => {}
+            Err(other) => panic!("expected RegistryStrictError, got {other:?}"),
+            Ok(_) => panic!("expected RegistryStrictError, got a schema"),
+        }
     }
 
     #[test]
@@ -1209,6 +1513,60 @@ mod tests {
         assert!(!range_ok("..ver", "2.0.1", Some("1.9.0"), Some("2.0.0")));
         assert!(range_ok("..ver", "1.2", Some("1.2"), Some("1.2.1"))); // prefix orders low
         assert!(!range_ok("..ver", "1.2.1", None, Some("1.2")));
+    }
+
+    #[test]
+    fn time_ranges_compare_instants_across_offsets() {
+        // The two spellings denote one instant (D-4 ruling): each is
+        // <= the other, and both land inside a range containing it.
+        let (a, b) = ("2025-12-31T23:00:00+01:00", "2026-01-01T00:00:00+02:00");
+        assert!(time_le(a, b) && time_le(b, a));
+        assert!(range_ok("..time", a, Some(b), Some(b)));
+        assert!(range_ok(
+            "..time",
+            b,
+            Some("2025-12-31T21:59:59Z"),
+            Some("2025-12-31T22:00:01Z")
+        ));
+        // Byte order would place the +01:00 spelling before the Z
+        // lower bound; instant order keeps it inside.
+        assert!(range_ok(
+            "..time",
+            "2026-01-01T01:30:00+01:00",
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-01-01T01:00:00Z")
+        ));
+        assert!(!range_ok(
+            "..time",
+            "2026-01-01T00:30:00+01:00", // 23:30Z the previous day
+            Some("2026-01-01T00:00:00Z"),
+            None
+        ));
+    }
+
+    #[test]
+    fn time_instants_and_fallback_shapes() {
+        // Fractional seconds compare numerically: .5 == .50, which
+        // byte order (prefix-first) would break at a range boundary.
+        assert!(time_le("10:00:00.50", "10:00:00.5"));
+        assert!(time_le("10:00:00.5", "10:00:00.50"));
+        assert!(!time_le("10:00:00.51", "10:00:00.5"));
+        // Local shapes stay on one axis each: dates, local
+        // date-times ([Tt ] separators equivalent), times.
+        assert!(time_le("2026-02-28", "2026-03-01"));
+        assert!(time_le("2026-07-03T21:00:00", "2026-07-03 21:00:00"));
+        assert!(time_le("2026-07-03 21:00:00", "2026-07-03t21:00:00"));
+        // Zulu spellings.
+        assert_eq!(
+            time_instant("2026-01-01T00:00:00Z"),
+            time_instant("2026-01-01T01:00:00+01:00")
+        );
+        assert_eq!(time_instant("1970-01-01T00:00:00Z"), Some((0, 0)));
+        // Off-shape operands (not RFC 3339) keep byte order.
+        assert!(time_instant("not-a-time").is_none());
+        assert!(time_instant("12:00:00Z").is_none()); // offset needs a date
+        assert!(time_instant("2026-13-01").is_none()); // month range
+        assert!(time_le("apple", "banana"));
     }
 
     /// Without the `collation` feature this is an L0-2 runtime:
@@ -1382,6 +1740,35 @@ mod tests {
                 &schema
             )
             .map_err(|e| e.error),
+            Err(AppError::CardinalityViolation)
+        );
+    }
+
+    #[test]
+    fn scalar_array_cardinality() {
+        // Cardinality on a SCALAR array: elements are `{arr}::N`
+        // value lines, not field groups — the counter must see them.
+        let schema = parse_csaiv(concat!(
+            ".!csaiv 1 acme/batch\n",
+            "/@ids [min=1] [max=3]\n",
+            "!str'/@ids::=\n",
+        ))
+        .unwrap();
+        let doc = |n: usize| {
+            let mut s = String::from(".!daiv\n");
+            for i in 0..n {
+                s.push_str(&format!("!str'/@ids::{i}=v{i}\n"));
+            }
+            s
+        };
+        assert_eq!(
+            validate(&doc(0), &schema).map_err(|e| e.error),
+            Err(AppError::CardinalityViolation)
+        );
+        assert_eq!(validate(&doc(1), &schema), Ok(()));
+        assert_eq!(validate(&doc(3), &schema), Ok(()));
+        assert_eq!(
+            validate(&doc(4), &schema).map_err(|e| e.error),
             Err(AppError::CardinalityViolation)
         );
     }

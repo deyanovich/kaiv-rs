@@ -145,16 +145,16 @@ fn parse_left(left: &str) -> Left<'_> {
 
 /// Split an authored namepath into steps and a terminal field
 /// (`/a/b::f` → (["a","b"], "f"); `key` → ([], "key")). Quote-aware
-/// only at the `::` boundary; quoted interior path segments are not
-/// yet supported.
+/// at both boundaries: the `::` split and the `/` step split skip
+/// quoted names, so a quoted segment may contain either operator
+/// literally (SPEC.md § Quoted Names).
 pub(crate) fn split_namepath(key: &str) -> (Vec<String>, String) {
     let (path, field) = match rsplit_projection(key) {
         Some((p, f)) => (p, f),
         None => ("", key),
     };
-    let steps = path
-        .trim_start_matches('/')
-        .split('/')
+    let steps = crate::lexer::split_slash(path.strip_prefix('/').unwrap_or(path))
+        .into_iter()
         .filter(|s| !s.is_empty())
         .map(normalize_seg)
         .collect();
@@ -228,8 +228,8 @@ fn path_steps(key: &str) -> Result<Vec<String>, PipelineError> {
             "'::' is not allowed in a path (namespace/array/map-assign) position".into(),
         ));
     }
-    Ok(trimmed
-        .split('/')
+    Ok(crate::lexer::split_slash(trimmed)
+        .into_iter()
         .filter(|s| !s.is_empty())
         .map(normalize_seg)
         .collect())
@@ -1225,6 +1225,43 @@ mod tests {
     fn build(input: &str) -> String {
         let raiv = crate::compile(input.as_bytes()).unwrap();
         crate::denorm::denormalize(&raiv).unwrap()
+    }
+
+    #[test]
+    fn quoted_interior_segments() {
+        // Quoted names are legal as any namepath segment (SPEC.md
+        // § Quoted Names): between `/` steps, after `@`, after `::`.
+        let d = build(".!kaiv 1\n!str\n/app/\"dark-mode\"::enabled=true\n");
+        assert!(d.contains("!str'/app/\"dark-mode\"::enabled=true\n"), "{d}");
+        let d = build(".!kaiv 1\n[/@\"x-servers\"]\n!int\n\"retry-count\"=3\n[]\n");
+        assert!(
+            d.contains("!int'/@\"x-servers\"/0::\"retry-count\"=3\n"),
+            "{d}"
+        );
+        // A quoted all-digit segment is an ordinary name, never an
+        // array index — it stays quoted (a bare `0` would address an
+        // element).
+        let d = build(".!kaiv 1\n/x/\"0\"::f=1\n");
+        assert!(d.contains("!str'/x/\"0\"::f=1\n"), "{d}");
+        // A quoted segment may contain the path operators literally —
+        // the step split is quote-aware, so `//` inside quotes is one
+        // name, not an empty step to be dropped.
+        for (input, want) in [
+            ("/\"a//b\"::f=1\n", "!str'/\"a//b\"::f=1\n"),
+            ("/\"a/b\"/x::f=1\n", "!str'/\"a/b\"/x::f=1\n"),
+            ("/\"a::b\"::f=1\n", "!str'/\"a::b\"::f=1\n"),
+            ("/\"a@b\"::f=1\n", "!str'/\"a@b\"::f=1\n"),
+        ] {
+            let d = build(&format!(".!kaiv 1\n{input}"));
+            assert!(d.contains(want), "{input} -> {d}");
+        }
+        // Over-quoted bare-able interior segments normalize (the
+        // MUST-iff rule): authored quoting of a bare-able name is
+        // legal but canonical form strips it.
+        let d = build(".!kaiv 1\n/\"app\"/\"x\"::f=1\n");
+        assert!(d.contains("!str'/app/x::f=1\n"), "{d}");
+        let d = build(".!kaiv 1\n[/@\"servers\"]\nh=a\n[]\n");
+        assert!(d.contains("!str'/@servers/0::h=a\n"), "{d}");
     }
 
     #[test]

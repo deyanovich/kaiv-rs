@@ -235,27 +235,31 @@ fn materialize_ns_array(
     Ok(di)
 }
 
-/// Emit a schema-matched data line, retyping `!str` to `!text` when
-/// the schema declares text (SPEC.md § The text Type): the schema
-/// type wins in the deployment artifact, so downstream consumers get
-/// the export semantics without re-reading the schema. The coercion
-/// is meaning-preserving only when the value carries no literal
-/// `|:|` — such content would be silently reinterpreted as line
-/// breaks, so it is a `DelimiterCollisionError` instead.
+/// Emit a schema-matched data line, lifting an untyped (`!str`)
+/// line to the schema's retained head type (SPEC.md § Head-Type
+/// Retention): the schema type wins in the deployment artifact, so
+/// downstream consumers — exporters included — get the type
+/// semantics without re-reading the schema. `text` keeps its
+/// meaning-preservation guard: a value carrying a literal `|:|`
+/// would be silently reinterpreted as line breaks, so it is a
+/// `DelimiterCollisionError` instead. Union heads never lift — the
+/// data line's annotation is the authored discriminant.
 fn emit_matched(f: &SchemaField, line: &str, out: &mut String) -> Result<(), PipelineError> {
-    if field_wants_text(f) {
+    if let Some(head) = field_head(f) {
         let body = line.trim_start_matches([' ', '\t']);
         if let Some(rest) = body.strip_prefix("!str") {
             if rest.starts_with(['\'', '?']) {
-                if let Some(eq) = rest.find('\'').and_then(|t| {
-                    crate::validator::first_eq(&rest[t + 1..]).map(|e| t + 1 + e)
-                }) {
-                    if rest[eq + 1..].trim_end_matches(['\n', '\r']).contains("|:|") {
-                        return Err(PipelineError::App(AppError::DelimiterCollision));
+                if head == "!text" {
+                    if let Some(eq) = rest.find('\'').and_then(|t| {
+                        crate::validator::first_eq(&rest[t + 1..]).map(|e| t + 1 + e)
+                    }) {
+                        if rest[eq + 1..].trim_end_matches(['\n', '\r']).contains("|:|") {
+                            return Err(PipelineError::App(AppError::DelimiterCollision));
+                        }
                     }
                 }
                 out.push_str(&line[..line.len() - body.len()]);
-                out.push_str("!text");
+                out.push_str(&head);
                 out.push_str(rest);
                 return Ok(());
             }
@@ -265,12 +269,21 @@ fn emit_matched(f: &SchemaField, line: &str, out: &mut String) -> Result<(), Pip
     Ok(())
 }
 
-/// Does the compiled field declare the `text` type (a retained
-/// non-union `!text` item)?
-fn field_wants_text(f: &SchemaField) -> bool {
-    f.items.iter().any(|i| match i {
-        crate::anno::Item::Anno(a) => a.type_name == "text" && a.union.is_empty(),
-        _ => false,
+/// The compiled field's retained head type token (`!text`,
+/// `!int:km`, `!acme/net/port`) — `None` when the head is the
+/// elided identity `str` or a union (whose data-line discriminant
+/// is authored, never lifted).
+fn field_head(f: &SchemaField) -> Option<String> {
+    f.items.iter().find_map(|i| match i {
+        crate::anno::Item::Anno(a) if a.union.is_empty() => {
+            let unit = a
+                .unit
+                .as_ref()
+                .map(|u| format!(":{u}"))
+                .unwrap_or_default();
+            Some(format!("!{}{unit}", a.type_name))
+        }
+        _ => None,
     })
 }
 
@@ -534,6 +547,48 @@ mod tests {
             denormalize_with(raiv3, &r),
             Err(PipelineError::App(AppError::DelimiterCollision))
         ));
+    }
+
+    #[test]
+    fn schema_head_types_lift_onto_str_lines() {
+        // Head-type retention end to end: untyped authored lines take
+        // the schema's head type at materialization — and exports
+        // regain fidelity (ints as numbers, bools as booleans), with
+        // no schema lookup downstream of the build.
+        let r = Resolver::offline();
+        let csaiv = concat!(
+            ".!csaiv 1 acme/gauge\n",
+            "!int /^-?[0-9]+$/ ..num'::level=\n",
+            "!bool {true,false}'::armed=\n",
+            "!acme/net/port /^-?[0-9]+$/ ..num [1,65535]'::port=\n",
+            "!int /^-?[0-9]+$/ ..num'::retries?=3\n",
+        );
+        r.preload("acme/gauge", "csaiv", csaiv.as_bytes().to_vec());
+        let raiv = ".!raiv\n.!schema:acme/gauge\n!str'::level=2\n!str'::armed=true\n!str'::port=8443\n";
+        let daiv = denormalize_with(raiv, &r).unwrap();
+        assert!(daiv.contains("!int'::level=2\n"), "{daiv}");
+        assert!(daiv.contains("!bool'::armed=true\n"), "{daiv}");
+        // Named heads lift by their authored name.
+        assert!(daiv.contains("!acme/net/port'::port=8443\n"), "{daiv}");
+        // An absent optional materializes its default under the head
+        // type, not as !str.
+        assert!(daiv.contains("!int'::retries=3\n"), "{daiv}");
+        // The lifted artifact validates, and the export is
+        // type-faithful: numbers and booleans, not strings.
+        let sc = crate::validator::parse_csaiv(csaiv).unwrap();
+        crate::validate(&daiv, &sc).unwrap();
+        #[cfg(feature = "json")]
+        {
+            let json = crate::json::export(&daiv).unwrap();
+            assert!(json.contains("\"level\":2"), "{json}");
+            assert!(json.contains("\"armed\":true"), "{json}");
+            assert!(json.contains("\"retries\":3"), "{json}");
+            // The exporter's typed-node mapping covers the core
+            // types plus std/time and std/num; a CUSTOM named head
+            // still exports as a string — the pre-retention export
+            // contract for non-core names, unchanged.
+            assert!(json.contains("\"port\":\"8443\""), "{json}");
+        }
     }
 
     #[test]

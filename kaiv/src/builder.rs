@@ -55,6 +55,7 @@ pub struct Provenance {
 pub struct DaivBuilder {
     sources: Vec<(String, String)>,
     types: Vec<String>,
+    schemas: Vec<String>,
     lines: Vec<String>,
 }
 
@@ -78,6 +79,28 @@ impl DaivBuilder {
         }
         if !self.types.iter().any(|t| t == lib) {
             self.types.push(lib.to_string());
+        }
+        Ok(())
+    }
+
+    /// Declare a `.!schema:<ref>` registry reference, emitted in the
+    /// header in declaration order — composition order IS composed
+    /// field order (SPEC.md § Schema Composition), so a server
+    /// emitting an envelope sandwich declares head, data, tail in
+    /// sequence. Registry references only (a served document should
+    /// not point at file URLs); idempotent per reference.
+    pub fn declare_schema(&mut self, reference: &str) -> Result<(), PipelineError> {
+        let ok = !reference.is_empty()
+            && reference
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '.'));
+        if !ok {
+            return Err(PipelineError::Other(format!(
+                "'{reference}' is not a valid schema registry reference"
+            )));
+        }
+        if !self.schemas.iter().any(|r| r == reference) {
+            self.schemas.push(reference.to_string());
         }
         Ok(())
     }
@@ -149,11 +172,81 @@ impl DaivBuilder {
         Ok(())
     }
 
+    /// Append one multi-line text leaf as the core `!text` type:
+    /// newlines in `value` become the `|:|` separator on a flat
+    /// canonical line (export resolves them back — SPEC.md § The
+    /// text Type). Errors:
+    /// - a literal `|:|` in the content — the separator would be
+    ///   reinterpreted; route such content through
+    ///   [`leaf_embed`](Self::leaf_embed) (`std/enc/plain` or a
+    ///   more specific encoding type);
+    /// - a carriage return — normalize line endings to `\n` first
+    ///   (the separator carries logical line breaks, not byte
+    ///   variants);
+    /// - NUL, or a leading `$` after joining (the flat-line rules,
+    ///   as for [`leaf`](Self::leaf)).
+    pub fn leaf_text(
+        &mut self,
+        namepath: &str,
+        value: &str,
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        if value.contains("|:|") {
+            return Err(PipelineError::Other(format!(
+                "text for {namepath} carries a literal '|:|' — the !text separator \
+                 cannot represent it; embed via leaf_embed (std/enc/plain)"
+            )));
+        }
+        if value.contains('\r') {
+            return Err(PipelineError::Other(format!(
+                "text for {namepath} carries a carriage return — normalize line \
+                 endings to \\n before leaf_text"
+            )));
+        }
+        let joined = value.replace('\n', "|:|");
+        self.leaf(namepath, "text", &joined, prov)
+    }
+
+    /// Append one embedded-content leaf: `bytes` are base64url-coded
+    /// (unpadded) under the `std/enc/<enc>` type — the channel for
+    /// content flat lines cannot carry (multi-line text with literal
+    /// `|:|`, binary, structured payloads). `enc` names the payload
+    /// kind: `plain`, `html`, `json`, `bin`, … (SPEC.md § The
+    /// std/enc Encoding Library).
+    pub fn leaf_embed(
+        &mut self,
+        namepath: &str,
+        enc: &str,
+        bytes: &[u8],
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        check_ident(enc, "std/enc payload kind")?;
+        let value = crate::b64::b64url_encode(bytes);
+        self.leaf(namepath, &format!("std/enc/{enc}"), &value, prov)
+    }
+
     /// The finished canonical document: the `.!kaiv` declaration,
     /// type-library imports, source declarations, then the data
     /// lines, one leaf per line.
     pub fn finish(&self) -> String {
-        let mut out = String::from(".!kaiv\n");
+        self.render(".!kaiv")
+    }
+
+    /// [`finish`](Self::finish) under the canonical `.!daiv`
+    /// declaration — the form a server SERVES (every line the
+    /// builder emits is already canonical, so the artifact is a
+    /// valid `.daiv` stream: what this returns, `Doc::parse` and
+    /// `validate` accept directly).
+    pub fn finish_daiv(&self) -> String {
+        self.render(".!daiv")
+    }
+
+    fn render(&self, declaration: &str) -> String {
+        let mut out = String::from(declaration);
+        out.push('\n');
+        for r in &self.schemas {
+            let _ = writeln!(out, ".!schema:{r}");
+        }
         for lib in &self.types {
             let _ = writeln!(out, ".!types {lib}");
         }
@@ -241,6 +334,11 @@ impl KaivBuilder {
         self.inner.declare_source(id, uri)
     }
 
+    /// See [`DaivBuilder::declare_schema`].
+    pub fn declare_schema(&mut self, reference: &str) -> Result<(), PipelineError> {
+        self.inner.declare_schema(reference)
+    }
+
     /// See [`DaivBuilder::leaf`].
     pub fn leaf(
         &mut self,
@@ -263,6 +361,27 @@ impl KaivBuilder {
     ) -> Result<(), PipelineError> {
         self.inner
             .leaf_with_unit(namepath, type_name, unit, value, prov)
+    }
+
+    /// See [`DaivBuilder::leaf_text`].
+    pub fn leaf_text(
+        &mut self,
+        namepath: &str,
+        value: &str,
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        self.inner.leaf_text(namepath, value, prov)
+    }
+
+    /// See [`DaivBuilder::leaf_embed`].
+    pub fn leaf_embed(
+        &mut self,
+        namepath: &str,
+        enc: &str,
+        bytes: &[u8],
+        prov: Option<&Provenance>,
+    ) -> Result<(), PipelineError> {
+        self.inner.leaf_embed(namepath, enc, bytes, prov)
     }
 
     /// The finished document in idiomatic authored form. Leaves are

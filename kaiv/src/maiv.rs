@@ -224,25 +224,21 @@ pub fn validate_maiv(
                     )));
                 }
                 match fallback {
-                    Some(Fallback::Constant(c)) => {
-                        if !default_applicable(&tf.items, c) {
-                            return Err(PipelineError::Other(format!(
-                                "ConstraintViolationError: override constant \
-                                 {c:?} does not satisfy the target field {}",
-                                rule.target
-                            )));
-                        }
+                    Some(Fallback::Constant(c)) if !default_applicable(&tf.items, c) => {
+                        return Err(PipelineError::Other(format!(
+                            "ConstraintViolationError: override constant \
+                             {c:?} does not satisfy the target field {}",
+                            rule.target
+                        )));
                     }
-                    Some(Fallback::Null) => {
-                        if !nullable(tf) {
-                            return Err(PipelineError::Other(format!(
-                                "|!null fallback on a non-nullable target \
-                                 field: {}",
-                                rule.target
-                            )));
-                        }
+                    Some(Fallback::Null) if !nullable(tf) => {
+                        return Err(PipelineError::Other(format!(
+                            "|!null fallback on a non-nullable target \
+                             field: {}",
+                            rule.target
+                        )));
                     }
-                    None => {}
+                    _ => {}
                 }
             }
             Rhs::Const(c) => {

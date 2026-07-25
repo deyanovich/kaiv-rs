@@ -73,7 +73,21 @@ fn flavor(d: &::toml::value::Datetime) -> &'static str {
 }
 
 pub fn export(canonical: &str) -> Result<String, PipelineError> {
-    let root = node_to_val(&json::tree(canonical)?)?;
+    export_tree(json::tree(canonical)?)
+}
+
+/// Type-resolving export: [`export`] with custom heads interpreted
+/// through the resolver / the declared schema (see
+/// [`json::export_with`](crate::json::export_with)).
+pub fn export_with(
+    canonical: &str,
+    resolver: &crate::resolve::Resolver,
+) -> Result<String, PipelineError> {
+    export_tree(json::tree_resolved(canonical, resolver)?)
+}
+
+fn export_tree(tree: json::Node) -> Result<String, PipelineError> {
+    let root = node_to_val(&tree)?;
     let Value::Table(t) = from_val(&root)? else {
         return Err(err("TOML root must be a table"));
     };
