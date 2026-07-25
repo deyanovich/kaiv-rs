@@ -40,6 +40,21 @@ impl Doc {
         })
     }
 
+    /// The scalar line at exactly `namepath`:
+    /// `(type_name, value)`. Crate-internal — the serde
+    /// deserializer's primitive.
+    pub(crate) fn line_at(&self, namepath: &str) -> Option<(&str, &str)> {
+        self.lines
+            .iter()
+            .find(|l| l.namepath == namepath)
+            .map(|l| (l.type_name.as_str(), l.value.as_str()))
+    }
+
+    /// Every data line's namepath, in document order.
+    pub(crate) fn namepaths(&self) -> impl Iterator<Item = &str> {
+        self.lines.iter().map(|l| l.namepath.as_str())
+    }
+
     /// The whole document as a [`View`] (empty namepath prefix).
     pub fn root(&self) -> View<'_> {
         View {
@@ -167,6 +182,14 @@ impl<'d> View<'d> {
         let t = self.typed(path)?;
         let enc = t.type_name.strip_prefix("std/enc/")?;
         Some((enc, crate::b64::b64url_decode(t.value)?))
+    }
+
+    pub(crate) fn doc(&self) -> &'d Doc {
+        self.doc
+    }
+
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
     }
 
     /// This view rescoped below `sub` (e.g. `"/params"`).

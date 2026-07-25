@@ -7,6 +7,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.8.0] - 2026-07-26
+--------------------
+
+### Added
+
+- **serde support (`--features serde`): kaiv as a serde data
+  format.** Any `#[derive(Serialize)]` type serializes straight
+  to canonical `.daiv` lines (`serde::serialize_into` — struct
+  fields to `::field` scalars and `/field` namespaces,
+  `Vec<scalar>` to vector lines, `Vec<struct>` to element runs,
+  `None` to `!null`, multi-line strings to `!text` with the
+  `std/enc` embed fallback), and any `#[derive(Deserialize)]`
+  type reads back out of a parsed `Doc` (`serde::from_doc` /
+  `from_view`) — deserialization driven by the TARGET type, so
+  untyped authored scalars decode into typed fields, while
+  self-describing targets read the line annotations. A `Heads`
+  table supplies per-field wire types where the name is the
+  semantics (union discriminants, `!text` under text unions) —
+  serde sees only the Rust type. Empty collections have no wire
+  representation (kaiv collections are never required): give
+  collection fields `#[serde(default)]`. This supersedes the
+  planned derive macro — serde's derive IS the derive, and a
+  server can go typed-struct → canonical lines → wire with no
+  intermediate value tree.
+
 [0.7.0] - 2026-07-26
 --------------------
 

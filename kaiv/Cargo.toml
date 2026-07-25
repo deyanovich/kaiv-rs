@@ -3,7 +3,7 @@ name = "kaiv"
 # 0.2.0: complete rewrite. 0.1.0 was the Era 1 "kv format" CLI tool;
 # this is the library-only reference implementation of the current
 # kaiv format (Levels 0-2), with the CLI split into `kaiv-cli`.
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.84.0"
 license = "MIT OR Apache-2.0"
@@ -24,6 +24,7 @@ exclude = ["tests"]
 # default already provides the `collate` module docs).
 [package.metadata.docs.rs]
 features = [
+    "serde",
     "net",
     "collation-icu",
     "json",
@@ -45,6 +46,7 @@ features = [
 default = ["net", "collation-icu"]
 net = ["dep:ureq"]
 json = []
+serde = ["dep:serde"]
 yaml = ["json", "dep:yaml-rust2"]
 toml = ["json", "dep:toml"]
 xml = ["json"]
@@ -72,6 +74,7 @@ collation-colligo = ["dep:colligo"]
 collation = ["collation-icu"]
 
 [dependencies]
+serde = { version = "1", optional = true, default-features = false, features = ["std"] }
 icu_collator = { version = "~2.1", optional = true }
 icu_locale = { version = "~2.1", optional = true }
 icu_locale_core = { version = "~2.1", optional = true }
@@ -82,3 +85,6 @@ colligo = { version = "0.1.1", default-features = false, features = ["embedded-d
 toml = { version = "1.1.2", features = ["preserve_order"], optional = true }
 ureq = { version = "3.3", optional = true, default-features = false, features = ["rustls"] }
 yaml-rust2 = { version = "0.11.0", optional = true }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

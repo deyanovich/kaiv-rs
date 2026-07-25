@@ -60,6 +60,8 @@ mod net;
 #[cfg(feature = "proto")]
 pub mod proto;
 pub mod resolve;
+#[cfg(feature = "serde")]
+pub mod serde;
 pub mod rex;
 pub mod schema;
 pub mod table;
