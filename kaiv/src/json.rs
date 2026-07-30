@@ -1385,7 +1385,7 @@ mod tests {
         r.preload(
             "acme/net",
             "taiv",
-            b".!taiv 1 acme/net\n\n!int[1,65535]\n&port=\n\n!bool\n&armed=\n\n/^[a-z-]+$/\n&label=\n"
+            b".!taiv acme/net\n\n!int[1,65535]\n&port=\n\n!bool\n&armed=\n\n/^[a-z-]+$/\n&label=\n"
                 .to_vec(),
         );
         let daiv = concat!(
@@ -1416,7 +1416,7 @@ mod tests {
         r.preload(
             "acme/gauge",
             "csaiv",
-            b".!csaiv 1 acme/gauge\n!acme/gauge/level /^-?[0-9]+$/ ..num'::level=\n"
+            b".!csaiv acme/gauge\n!acme/gauge/level /^-?[0-9]+$/ ..num'::level=\n"
                 .to_vec(),
         );
         let daiv = ".!daiv\n.!schema:acme/gauge\n!acme/gauge/level'::level=7\n";
@@ -1434,7 +1434,7 @@ mod tests {
         assert!(out.contains("\"x\":\"5\""), "{out}");
         // Resolved-numeric head with a non-numeric value: resolution
         // refines, it cannot reject — the string form again.
-        r.preload("acme/n", "taiv", b".!taiv 1 acme/n\n\n!int\n&count=\n".to_vec());
+        r.preload("acme/n", "taiv", b".!taiv acme/n\n\n!int\n&count=\n".to_vec());
         let daiv2 = ".!daiv\n!acme/n/count'::x=not-a-number\n";
         let out2 = super::export_with(daiv2, &r).unwrap();
         assert!(out2.contains("\"x\":\"not-a-number\""), "{out2}");

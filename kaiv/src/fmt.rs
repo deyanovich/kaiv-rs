@@ -88,12 +88,21 @@ fn norm_comment(prefix: &str, body: &str) -> String {
 }
 
 /// Normalize a declaration line: single spaces between tokens, and
-/// the format declaration of `kind` spelled bare when it names
-/// version 1 (`.!kaiv 1` → `.!kaiv`).
-fn norm_decl(s: &str, kind: &str) -> String {
-    let toks: Vec<&str> = s.split_ascii_whitespace().collect();
-    if toks.len() == 2 && toks[0] == format!(".!{kind}") && toks[1] == "1" {
-        return toks[0].to_string();
+/// any format declaration spelled bare when it names version 1
+/// (`.!kaiv 1` → `.!kaiv`, `.!saiv acme/x` → `.!saiv acme/x` —
+/// the bare form is canonical for every kind, SPEC.md § Format
+/// Declaration).
+fn norm_decl(s: &str) -> String {
+    let mut toks: Vec<&str> = s.split_ascii_whitespace().collect();
+    if toks.len() >= 2
+        && matches!(
+            toks[0],
+            ".!kaiv" | ".!raiv" | ".!daiv" | ".!maiv" | ".!saiv" | ".!csaiv" | ".!taiv"
+                | ".!faiv" | ".!msaiv"
+        )
+        && crate::lexer::is_version_one(toks[1])
+    {
+        toks.remove(1);
     }
     toks.join(" ")
 }
@@ -335,7 +344,7 @@ fn parse_authored(input: &str) -> Result<(Option<String>, Vec<Node>), PipelineEr
             }
             LineKind::Decl(s) => {
                 flush_metas(&mut nodes, &mut metas);
-                nodes.push(Node::Raw(norm_decl(s, "kaiv")));
+                nodes.push(Node::Raw(norm_decl(s)));
                 i += 1;
             }
             LineKind::Meta(s) => {
@@ -569,7 +578,7 @@ fn raw_line(l: &crate::lexer::Line<'_>, nodes: &mut Vec<Node>) {
         }
         LineKind::Comment(c) => nodes.push(Node::Comment(norm_comment("#", c))),
         LineKind::Doc(c) => nodes.push(Node::Comment(norm_comment("//", c))),
-        LineKind::Decl(s) => nodes.push(Node::Raw(norm_decl(s, "kaiv"))),
+        LineKind::Decl(s) => nodes.push(Node::Raw(norm_decl(s))),
         LineKind::Meta(s) => nodes.push(Node::Raw(s.trim_end().to_string())),
         LineKind::SectionOpen(inner) => {
             nodes.push(Node::Raw(format!("[{}]", crate::table::tokens(inner).join(" "))))
@@ -642,7 +651,7 @@ fn parse_canonical(input: &str, is_daiv: bool) -> Result<Vec<Node>, PipelineErro
             continue;
         }
         if s.starts_with(".!") || s.starts_with(".?") {
-            nodes.push(Node::Raw(norm_decl(s, "kaiv")));
+            nodes.push(Node::Raw(norm_decl(s)));
             continue;
         }
         // `[!meta']namepath=value`

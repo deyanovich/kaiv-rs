@@ -1149,7 +1149,7 @@ pub fn import_schema(
         imports: std::collections::BTreeSet::new(),
     };
     ctx.message_fields(mi, "", &mut vec![mi])?;
-    let mut out = format!(".!saiv 1 {name}\n");
+    let mut out = format!(".!saiv {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -1635,7 +1635,7 @@ mod tests {
     #[test]
     fn schema_convert_core_mapping() {
         let saiv = import_schema(SCHEMA, None, "acme/config").unwrap();
-        assert!(saiv.starts_with(".!saiv 1 acme/config\n"));
+        assert!(saiv.starts_with(".!saiv acme/config\n"));
         assert!(saiv.contains(".!types std/enc\n"));
         assert!(saiv.contains(".!types std/num\n"));
         assert!(saiv.contains("host?=\n"));

@@ -47,7 +47,7 @@ pub fn import_schema(
         )));
     };
     ctx.object_fields(fields, "", &mut vec![root])?;
-    let mut out = format!(".!saiv 1 {name}\n\n");
+    let mut out = format!(".!saiv {name}\n\n");
     out.push_str(&ctx.body);
     Ok(out)
 }
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn core_mapping() {
         let saiv = import_schema(SDL.as_bytes(), Some("Config"), "acme/config").unwrap();
-        assert!(saiv.starts_with(".!saiv 1 acme/config\n"));
+        assert!(saiv.starts_with(".!saiv acme/config\n"));
         assert!(saiv.contains("// The service name.\nname=\n"));
         assert!(saiv.contains("!int[-2147483648,2147483647]\nport=\n"));
         assert!(saiv.contains("!null|float\nratio?=\n"));

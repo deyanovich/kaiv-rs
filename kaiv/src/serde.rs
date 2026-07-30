@@ -16,7 +16,7 @@
 //!   collisions the `std/enc` embed channel.
 //!
 //! Where a field's wire type must be a NAMED head (a union
-//! discriminant such as `!null|kyklos/core/bd`, or `!text` for
+//! discriminant such as `!null|forum/core/flair`, or `!text` for
 //! single-line values under a text union), pass it in [`Heads`] —
 //! serde sees only the Rust type, and unions are nominal.
 //!
@@ -86,7 +86,7 @@ pub enum Head {
     /// the named `std/enc` payload kind on separator collision.
     Text { embed: &'static str },
     /// Emit string values under this named type — the union
-    /// discriminant (`kyklos/core/bd`, `std/time/datetime`, …).
+    /// discriminant (`forum/core/flair`, `std/time/datetime`, …).
     Named(&'static str),
 }
 
@@ -921,9 +921,9 @@ mod tests {
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct Post {
-        ruid: String,
+        id: String,
         level: i32,
-        b: Option<String>,
+        flair: Option<String>,
         title: Option<String>,
         body: Option<String>,
         #[serde(default)]
@@ -940,16 +940,16 @@ mod tests {
 
     const HEADS: Heads<'static> = &[
         ("body", Head::Text { embed: "html" }),
-        ("b", Head::Named("kyklos/core/bd")),
+        ("flair", Head::Named("forum/core/flair")),
     ];
 
     fn sample() -> Reply {
         Reply {
             posts: vec![
                 Post {
-                    ruid: "@a+1".into(),
+                    id: "t3_a1".into(),
                     level: 1,
-                    b: Some("acme".into()),
+                    flair: Some("acme".into()),
                     title: Some("hello".into()),
                     body: Some("<p>one</p>\n<p>two</p>".into()),
                     tags: vec!["music".into(), "repair".into()],
@@ -957,9 +957,9 @@ mod tests {
                     score: 1.5,
                 },
                 Post {
-                    ruid: "@b+1".into(),
+                    id: "t1_b1".into(),
                     level: 2,
-                    b: None,
+                    flair: None,
                     title: None,
                     body: Some("<p>solo</p>".into()),
                     tags: vec![],
@@ -981,11 +981,11 @@ mod tests {
     fn typed_round_trip_with_heads() {
         let daiv = emit(&sample());
         // Domain-typed lines, straight from serde.
-        assert!(daiv.contains("!kyklos/core/bd'/data/@posts/0::b=acme"), "{daiv}");
+        assert!(daiv.contains("!forum/core/flair'/data/@posts/0::flair=acme"), "{daiv}");
         assert!(daiv.contains("!text'/data/@posts/0::body=<p>one</p>|:|<p>two</p>"), "{daiv}");
         // The single-line body still rides !text (hinted field).
         assert!(daiv.contains("!text'/data/@posts/1::body=<p>solo</p>"), "{daiv}");
-        assert!(daiv.contains("!null'/data/@posts/1::b="), "{daiv}");
+        assert!(daiv.contains("!null'/data/@posts/1::flair="), "{daiv}");
         assert!(daiv.contains("!bool'/data/@posts/1::locked=true"), "{daiv}");
         assert!(daiv.contains("!float'/data/@posts/0::score=1.5"), "{daiv}");
         assert!(daiv.contains("!str'/data/@posts/0/@tags::1=repair"), "{daiv}");
@@ -1001,7 +1001,7 @@ mod tests {
         #[serde(rename_all = "camelCase")]
         struct Params {
             ws: String,
-            ruids: Vec<String>,
+            ids: Vec<String>,
             #[serde(default)]
             limit: i64,
             #[serde(default)]
@@ -1011,14 +1011,14 @@ mod tests {
         let daiv = concat!(
             ".!daiv\n",
             "!str'/params::ws=TLO\n",
-            "!str'/params/@ruids::0=@a+1\n",
-            "!str'/params/@ruids::1=@b+2\n",
+            "!str'/params/@ids::0=t3_a1\n",
+            "!str'/params/@ids::1=t1_b2\n",
             "!str'/params::limit=50\n",
         );
         let doc = Doc::parse(daiv).unwrap();
         let p: Params = from_doc(&doc, "/params").unwrap();
         assert_eq!(p.ws, "TLO");
-        assert_eq!(p.ruids, vec!["@a+1", "@b+2"]);
+        assert_eq!(p.ids, vec!["t3_a1", "t1_b2"]);
         assert_eq!(p.limit, 50);
         assert_eq!(p.is_staff, None);
     }

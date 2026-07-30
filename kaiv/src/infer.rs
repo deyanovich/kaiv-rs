@@ -205,7 +205,7 @@ pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
             }
         }
     }
-    let mut out = format!(".!saiv 1 {name}\n");
+    let mut out = format!(".!saiv {name}\n");
     for lib in &imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -400,7 +400,7 @@ mod tests {
     fn infers_types_arrays_and_tables() {
         let daiv = ".!daiv\n!str'::name=eu1\n!int'::port=8443\n!float'::ratio=2.5\n!null'::note=\n!std/time/datetime'::when=2026-07-03T21:00:00Z\n!int'/@ports::0=80\n!int'/@ports::1=443\n!str'/@servers/0::host=a\n!int'/@servers/0::port=1\n!str'/@servers/1::host=b\n!int'/@servers/1::port=2\n!str'/@servers/1::role=spare\n";
         let saiv = infer(daiv, "acme/cluster").unwrap();
-        assert!(saiv.starts_with(".!saiv 1 acme/cluster\n.!types std/time\n"));
+        assert!(saiv.starts_with(".!saiv acme/cluster\n.!types std/time\n"));
         assert!(saiv.contains("name=\n"));
         assert!(saiv.contains("!int\nport=\n"));
         assert!(saiv.contains("!null|str\nnote=\n"));

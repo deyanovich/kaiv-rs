@@ -112,11 +112,10 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
         match &line.kind {
             LineKind::Blank | LineKind::Comment(_) | LineKind::Doc(_) => {}
             LineKind::Decl(s) => {
-                // `.!faiv VERSION LIBRARY-ID`
+                // `.!faiv [VERSION] LIBRARY-ID`
                 if let Some(rest) = s.strip_prefix(".!faiv") {
-                    let mut toks = rest.split_ascii_whitespace();
-                    let _version = toks.next();
-                    if let Some(lib) = toks.next() {
+                    let rest = crate::lexer::skip_decl_version(rest);
+                    if let Some(lib) = rest.split_ascii_whitespace().next() {
                         library = lib.to_string();
                     }
                 }
@@ -220,7 +219,7 @@ mod tests {
 
     #[test]
     fn parse_library() {
-        let src = b".!faiv 1 astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&ua=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
+        let src = b".!faiv astro/units\n\n// Astronomical unit\nm 1.495978707e11\n&au=\n&ua=au\n\n// Custom currency with a rate source\n$ @https://rates.example.com/v1?code={code}&at={timestamp}\n&~XYZ=\n";
         let lib = parse_faiv(src).unwrap();
         assert_eq!(lib.library, "astro/units");
         let au = &lib.units["au"];
@@ -236,11 +235,11 @@ mod tests {
     #[test]
     fn invalid_unit_names_and_orphan_lines_rejected() {
         // Underscore name is not 1*ALPHA.
-        assert!(parse_faiv(b".!faiv 1 x/u\nm 1.0\n&light_second=\n").is_err());
+        assert!(parse_faiv(b".!faiv x/u\nm 1.0\n&light_second=\n").is_err());
         // Dimension line above an alias defines nothing.
-        assert!(parse_faiv(b".!faiv 1 x/u\nm 1000\n&km=\nm 1609.344\n&mile=km\n").is_err());
+        assert!(parse_faiv(b".!faiv x/u\nm 1000\n&km=\nm 1609.344\n&mile=km\n").is_err());
         // Trailing dimension line with no &name=.
-        assert!(parse_faiv(b".!faiv 1 x/u\nm 1.0\n").is_err());
+        assert!(parse_faiv(b".!faiv x/u\nm 1.0\n").is_err());
     }
 
     #[test]

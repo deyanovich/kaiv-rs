@@ -218,12 +218,12 @@ mod tests {
         ".!daiv\n",
         "!str'::method=Post.MultiGet\n",
         "!str'/params::ws=TLO\n",
-        "!str'/params/@ruids::0=@a+1\n",
-        "!str'/params/@ruids::1=@b+2\n",
-        "!str'/data/@posts/0::ruid=@a+1\n",
+        "!str'/params/@ids::0=t3_a1\n",
+        "!str'/params/@ids::1=t1_b2\n",
+        "!str'/data/@posts/0::id=t3_a1\n",
         "!null'/data/@posts/0::title=\n",
         "!str'/data/@posts/0/@tags::0=infra\n",
-        "!str'/data/@posts/1::ruid=@b+2\n",
+        "!str'/data/@posts/1::id=t1_b2\n",
         "!str'/data/@posts/1::title=hello\n",
     );
 
@@ -234,10 +234,10 @@ mod tests {
         assert_eq!(root.value("::method"), Some("Post.MultiGet"));
         let params = root.view("/params");
         assert_eq!(params.value("::ws"), Some("TLO"));
-        assert_eq!(params.scalars("/@ruids"), vec!["@a+1", "@b+2"]);
+        assert_eq!(params.scalars("/@ids"), vec!["t3_a1", "t1_b2"]);
         let posts = root.elements("/data/@posts");
         assert_eq!(posts.len(), 2);
-        assert_eq!(posts[0].value("::ruid"), Some("@a+1"));
+        assert_eq!(posts[0].value("::id"), Some("t3_a1"));
         assert!(posts[0].is_null("::title"));
         assert_eq!(posts[0].value("::title"), None);
         assert_eq!(posts[0].scalars("/@tags"), vec!["infra"]);
@@ -250,20 +250,20 @@ mod tests {
     fn from_daiv_decoding() {
         struct Params {
             ws: String,
-            ruids: Vec<String>,
+            ids: Vec<String>,
         }
         impl FromDaiv for Params {
             fn from_daiv(v: &View<'_>) -> Result<Self, PipelineError> {
                 Ok(Params {
                     ws: v.required("::ws")?.to_string(),
-                    ruids: v.scalars("/@ruids").iter().map(|s| s.to_string()).collect(),
+                    ids: v.scalars("/@ids").iter().map(|s| s.to_string()).collect(),
                 })
             }
         }
         let doc = Doc::parse(DOC).unwrap();
         let p = Params::from_daiv(&doc.root().view("/params")).unwrap();
         assert_eq!(p.ws, "TLO");
-        assert_eq!(p.ruids.len(), 2);
+        assert_eq!(p.ids.len(), 2);
         let missing = Params::from_daiv(&doc.root().view("/nowhere"));
         assert!(missing.is_err());
     }

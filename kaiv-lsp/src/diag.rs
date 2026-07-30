@@ -202,7 +202,7 @@ mod tests {
     fn schema_pipeline_runs_for_saiv() {
         let d = check(
             "file:///tmp/s.saiv",
-            ".!saiv 1 acme/x\n!str\nhost=\n",
+            ".!saiv acme/x\n!str\nhost=\n",
         )
         .unwrap();
         assert!(d.is_empty(), "{d:?}");

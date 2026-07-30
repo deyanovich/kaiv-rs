@@ -65,7 +65,7 @@ pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
     if let Some(Val::Bool(false)) = get(top, "additionalProperties") {
         ctx.note("additionalProperties: false (kaiv strict is document-wide; not emitted)");
     }
-    let mut out = format!(".!saiv 1 {name}\n");
+    let mut out = format!(".!saiv {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -834,7 +834,7 @@ mod tests {
         let saiv = import(src, "acme/svc").unwrap();
         // `when` is optional, so std/time joins as a fully-qualified
         // union alternative rather than an `&name` + import.
-        assert!(saiv.starts_with(".!saiv 1 acme/svc\n"));
+        assert!(saiv.starts_with(".!saiv acme/svc\n"));
         assert!(saiv.contains("// Service name\nname=\n"));
         assert!(saiv.contains("!int[1,65535]\nport=8080\n"));
         // exclusiveMinimum on number: dropped with a note.

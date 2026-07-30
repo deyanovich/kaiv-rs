@@ -532,7 +532,7 @@ mod tests {
         // !text-declared field is retyped at materialization, so the
         // deployment artifact carries the export semantics.
         let r = Resolver::offline();
-        let csaiv = ".!csaiv 1 acme/notes\n!text'::basho=\n";
+        let csaiv = ".!csaiv acme/notes\n!text'::basho=\n";
         r.preload("acme/notes", "csaiv", csaiv.as_bytes().to_vec());
         let raiv = ".!raiv\n.!schema:acme/notes\n!str'::basho=old pond\n";
         let daiv = denormalize_with(raiv, &r).unwrap();
@@ -557,7 +557,7 @@ mod tests {
         // no schema lookup downstream of the build.
         let r = Resolver::offline();
         let csaiv = concat!(
-            ".!csaiv 1 acme/gauge\n",
+            ".!csaiv acme/gauge\n",
             "!int /^-?[0-9]+$/ ..num'::level=\n",
             "!bool {true,false}'::armed=\n",
             "!acme/net/port /^-?[0-9]+$/ ..num [1,65535]'::port=\n",

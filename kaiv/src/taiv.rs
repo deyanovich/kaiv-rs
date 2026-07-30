@@ -37,11 +37,10 @@ pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
         match &line.kind {
             LineKind::Blank | LineKind::Comment(_) | LineKind::Doc(_) => {}
             LineKind::Decl(s) => {
-                // `.!taiv VERSION LIBRARY-ID`
+                // `.!taiv [VERSION] LIBRARY-ID`
                 if let Some(rest) = s.strip_prefix(".!taiv") {
-                    let mut toks = rest.split_ascii_whitespace();
-                    let _version = toks.next();
-                    if let Some(lib) = toks.next() {
+                    let rest = crate::lexer::skip_decl_version(rest);
+                    if let Some(lib) = rest.split_ascii_whitespace().next() {
                         library = lib.to_string();
                     }
                 }
@@ -202,7 +201,7 @@ mod tests {
 #[cfg(test)]
 mod net_math_tests {
     fn accepts(lib: &str, ty: &str, value: &str) -> bool {
-        let saiv = format!(".!saiv 1 t/x\n.!types {lib}\n\n&{ty}\nv=\n");
+        let saiv = format!(".!saiv t/x\n.!types {lib}\n\n&{ty}\nv=\n");
         let csaiv = crate::compile_schema(saiv.as_bytes()).unwrap();
         let sc = crate::parse_csaiv(&csaiv).unwrap();
         let daiv = format!(".!daiv\n!str'::v={value}\n");

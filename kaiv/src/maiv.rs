@@ -621,8 +621,8 @@ mod tests {
     use super::*;
     use crate::error::{AppError, PipelineError};
 
-    const SRC: &str = ".!saiv 1 acme/fleet\n!str\nlegacy_region=\n[/@servers]\n!str\nhostname=\n!int\nweight=\n[]\n";
-    const TGT: &str = ".!saiv 1 hub/nodes\n!null|int\nregion=\n[/@nodes]\n!str\nhost=\n[]\n";
+    const SRC: &str = ".!saiv acme/fleet\n!str\nlegacy_region=\n[/@servers]\n!str\nhostname=\n!int\nweight=\n[]\n";
+    const TGT: &str = ".!saiv hub/nodes\n!null|int\nregion=\n[/@nodes]\n!str\nhost=\n[]\n";
     const MAP: &str = ".!maiv\n.!source acme/fleet\n.!target hub/nodes\n.!drop /@servers/*::weight\n\n/@nodes/*::host=$/@servers/*::hostname\n::region=$::legacy_region|!null\n";
 
     fn schemas() -> (CompiledSchema, CompiledSchema) {

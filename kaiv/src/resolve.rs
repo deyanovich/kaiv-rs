@@ -398,7 +398,7 @@ pub fn resolve_named(
 mod tests {
     use super::*;
 
-    const ACME_NET: &[u8] = b".!taiv 1 acme/net\n\n{tcp,udp}\n&proto=tcp\n";
+    const ACME_NET: &[u8] = b".!taiv acme/net\n\n{tcp,udp}\n&proto=tcp\n";
 
     /// A resolver whose every base lookup is a filesystem miss —
     /// keeps these tests off the Layer 4 network hosts.

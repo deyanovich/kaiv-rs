@@ -7,6 +7,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.9.0] - 2026-07-29
+--------------------
+
+### Changed
+
+- **The declaration version is optional for every kind — the
+  bare form is canonical family-wide.** The identity-carrying
+  kinds (`.!saiv`/`.!csaiv`/`.!taiv`/`.!faiv`/`.!msaiv`) no
+  longer require the version token: the declaration is split by
+  token shape — a digit-first first token is the version slot
+  (validated as before, `UNSUPPORTED_VERSION` on a non-1
+  major), any other first token is the identity, with version 1
+  implicit (an identity is alpha-first by grammar, so the two
+  can never collide). `.!saiv acme/x strict` is now the
+  canonical spelling; `.!saiv 1 acme/x strict` remains
+  equivalent authored input. The schema compiler normalizes a
+  version-1 `.!saiv` header to a bare `.!csaiv` header
+  (an explicit non-1 version is preserved), the schema
+  importers/inference (`import-json-schema`, `import-xsd`,
+  `import-proto`, `import-avro`, `import-graphql`, `infer`)
+  emit the bare form, `kaiv fmt` strips a version-1 token from
+  every declaration kind (previously `.!kaiv` only), and the
+  embedded `std/*` type libraries open bare. Tracks the spec's
+  § Format Declaration change (1.0.0-alpha.10); conformance
+  vectors swept, with new `schema/043-versioned-saiv-header`
+  and `compile-error/017-unsupported-version` vectors.
+
 [0.8.0] - 2026-07-26
 --------------------
 

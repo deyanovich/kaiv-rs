@@ -506,18 +506,21 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
         word.as_str(),
         "kaiv" | "raiv" | "daiv" | "saiv" | "csaiv" | "taiv" | "faiv" | "maiv" | "msaiv"
     ) {
-        // The data kinds — and `.!maiv`, which carries no identity
-        // token since a mapping's identity is its `.!source`/`.!target`
-        // endpoint pair (SPEC.md § Mappings) — admit a bare
-        // (versionless) declaration meaning version 1; the
-        // identity-carrying kinds require the version.
+        // The bare (versionless) form means version 1 for every
+        // kind. The identity-carrying kinds split their declaration
+        // by token shape: a digit-first first token is the version
+        // slot (an identity is alpha-first by grammar,
+        // SPEC.md § Format Declaration), any other first token is
+        // the identity with version 1 implicit. `.!maiv` carries no
+        // identity token — a mapping's identity is its
+        // `.!source`/`.!target` endpoint pair (SPEC.md § Mappings).
         let data_kind = matches!(word.as_str(), "kaiv" | "raiv" | "daiv" | "maiv");
         let rest = body[word.len()..].trim_start_matches([' ', '\t']);
-        let version: &str = rest.split([' ', '\t']).next().unwrap_or("");
-        if version.is_empty() && data_kind {
+        let first: &str = rest.split([' ', '\t']).next().unwrap_or("");
+        if first.is_empty() || (!data_kind && !first.as_bytes()[0].is_ascii_digit()) {
             return Ok(());
         }
-        let major = check_version(version).ok_or(LexErrorAt {
+        let major = check_version(first).ok_or(LexErrorAt {
             error: LexError::InvalidVersion,
             line: no,
         })?;
@@ -531,7 +534,7 @@ fn check_declaration(s: &str, no: usize) -> Result<(), LexErrorAt> {
         // `.!kaiv`/`.!raiv`/`.!daiv`/`.!maiv` admit nothing after the version
         // (SPEC.md § 10.3 format-decl); the other keywords carry a
         // mandatory operand.
-        if data_kind && !rest[version.len()..].trim_matches([' ', '\t']).is_empty() {
+        if data_kind && !rest[first.len()..].trim_matches([' ', '\t']).is_empty() {
             return Err(LexErrorAt {
                 error: LexError::InvalidVersion,
                 line: no,
@@ -559,6 +562,50 @@ fn check_version(v: &str) -> Option<u64> {
     // INVALID_VERSION: saturate rather than fail so the != 1 branch
     // reports it (SPEC.md § 11.1).
     Some(major.parse().unwrap_or(u64::MAX))
+}
+
+/// The operand list of an identity-carrying declaration with any
+/// leading digit-first version token removed — the shape rule of
+/// SPEC.md § Format Declaration (an identity is alpha-first by
+/// grammar, so a digit-first first token is the version slot).
+pub(crate) fn skip_decl_version(rest: &str) -> &str {
+    let rest = rest.trim_start_matches([' ', '\t']);
+    match rest.as_bytes().first() {
+        Some(b) if b.is_ascii_digit() => {
+            let end = rest.find([' ', '\t']).unwrap_or(rest.len());
+            rest[end..].trim_start_matches([' ', '\t'])
+        }
+        _ => rest,
+    }
+}
+
+/// True iff `tok` is a version token naming version 1 exactly —
+/// `1`, `1.0`, `1.0.0` (omitted components are zero, so these are
+/// the same version and canonicalize to the bare declaration form;
+/// SPEC.md § Format Declaration).
+pub(crate) fn is_version_one(tok: &str) -> bool {
+    let mut parts = tok.split('.');
+    let Some(major) = parts.next() else {
+        return false;
+    };
+    if major.is_empty()
+        || !major.bytes().all(|b| b.is_ascii_digit())
+        || major.parse::<u64>() != Ok(1)
+    {
+        return false;
+    }
+    let mut n = 0;
+    for p in parts {
+        n += 1;
+        if n > 2
+            || p.is_empty()
+            || !p.bytes().all(|b| b.is_ascii_digit())
+            || p.parse::<u64>() != Ok(0)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Validate the left side of a content line (SPEC.md § Lexer Errors,
@@ -862,6 +909,7 @@ mod tests {
         for l in [
             ".!maiv",
             ".!maiv 1",
+            ".!msaiv corp/c",
             ".!msaiv 1 corp/c",
             ".!source hub/s",
             ".!target hub/t",
@@ -916,6 +964,38 @@ mod tests {
             Err(LexError::InvalidVersion)
         );
         assert!(one(FileKind::Data, ".!kaiv 1").is_ok());
+    }
+
+    #[test]
+    fn identity_declarations_split_by_token_shape() {
+        // Bare and versioned forms are both accepted; a digit-first
+        // first token is the version slot and is shape-validated,
+        // while an alpha-first first token is the identity
+        // (SPEC.md § Format Declaration).
+        for l in [
+            ".!saiv acme/x",
+            ".!saiv acme/x strict",
+            ".!saiv 1 acme/x",
+            ".!saiv 1.0.0 acme/x strict",
+            ".!taiv std/core",
+            ".!taiv 1 std/core",
+            ".!faiv astro/units",
+            ".!csaiv acme/x",
+        ] {
+            assert!(one(FileKind::Data, l).is_ok(), "{l}");
+        }
+        assert_eq!(
+            one(FileKind::Data, ".!saiv 1.2.3.4 acme/x"),
+            Err(LexError::InvalidVersion)
+        );
+        assert_eq!(
+            one(FileKind::Data, ".!saiv 1x acme/x"),
+            Err(LexError::InvalidVersion)
+        );
+        assert_eq!(
+            one(FileKind::Data, ".!taiv 99 std/core"),
+            Err(LexError::UnsupportedVersion)
+        );
     }
 
     #[test]

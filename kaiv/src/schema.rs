@@ -3,7 +3,8 @@
 //! registry-resolved — to their constraint forms; carries requiredness
 //! in the `=`/`?=` operator; carries the `.!saiv` header (including
 //! the strict modifier) into the output with the keyword rewritten
-//! to `.!csaiv` (SPEC.md § Format Declaration).
+//! to `.!csaiv` and a version-1 header normalized to the bare form
+//! (SPEC.md § Format Declaration).
 
 use crate::anno::{parse_annotation, parse_constraint_items, Annotation, Constraint, Item};
 use crate::error::{AppError, PipelineError};
@@ -150,7 +151,22 @@ fn compile_schema_chain(
                 // and .!registry overrides configure resolution and
                 // are resolved away at compile time.
                 if let Some(rest) = s.strip_prefix(".!saiv") {
-                    out.push(format!(".!csaiv{rest}"));
+                    // A version-1 header normalizes to the bare form;
+                    // an explicit non-1 version (1.x etc.) is
+                    // preserved verbatim.
+                    let mut toks = rest.split_ascii_whitespace().peekable();
+                    if toks
+                        .peek()
+                        .is_some_and(|t| crate::lexer::is_version_one(t))
+                    {
+                        toks.next();
+                    }
+                    let mut header = String::from(".!csaiv");
+                    for t in toks {
+                        header.push(' ');
+                        header.push_str(t);
+                    }
+                    out.push(header);
                 } else if s.starts_with(".!provenance") {
                     // Propagates verbatim into the .csaiv header —
                     // the Validator reads the compiled artifact.
@@ -1190,7 +1206,7 @@ mod tests {
     fn multi_segment_ns_block_scopes_symmetrically() {
         // `(/a/b) ... ()` must pop both segments; a field after the
         // close scopes at root, not the stale `/a`.
-        let out = compile_schema(b".!saiv 1 a/n\n(/a/b)\nhost=\n()\nport=\n").unwrap();
+        let out = compile_schema(b".!saiv a/n\n(/a/b)\nhost=\n()\nport=\n").unwrap();
         assert!(out.contains("'/a/b::host="), "got: {out}");
         assert!(out.contains("'::port="), "got: {out}");
         assert!(!out.contains("'/a::port="), "stale prefix leaked: {out}");
@@ -1198,12 +1214,12 @@ mod tests {
 
     #[test]
     fn ns_block_schema_annotation_is_rejected() {
-        assert!(compile_schema(b".!saiv 1 a/n\n(/server schema:hub/x)\nhost=\n()\n").is_err());
+        assert!(compile_schema(b".!saiv a/n\n(/server schema:hub/x)\nhost=\n()\n").is_err());
     }
 
     #[test]
     fn unit_on_union_type_is_rejected() {
-        assert!(compile_schema(b".!saiv 1 a/u\n!int:s|null\ntimeout=\n").is_err());
+        assert!(compile_schema(b".!saiv a/u\n!int:s|null\ntimeout=\n").is_err());
     }
 
     #[test]
@@ -1211,18 +1227,18 @@ mod tests {
         // Materialized lines carry no provenance, so required/source
         // plus an optional field can never validate — reject statically.
         assert!(compile_schema(
-            b".!saiv 1 a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
+            b".!saiv a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
         )
         .is_err());
         assert!(compile_schema(
-            b".!saiv 1 a/p\n.!provenance:source\n!str\ntimeout?=5\n"
+            b".!saiv a/p\n.!provenance:source\n!str\ntimeout?=5\n"
         )
         .is_err());
         // Required-only fields, or the none level, are fine.
         assert!(
-            compile_schema(b".!saiv 1 a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
+            compile_schema(b".!saiv a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
         );
-        assert!(compile_schema(b".!saiv 1 a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
+        assert!(compile_schema(b".!saiv a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
     }
 
     #[test]
@@ -1232,24 +1248,24 @@ mod tests {
         // key line, bounds on the header — lowers to the § 7.5
         // compiled form: collection line + entry line.
         let out = compile_schema(
-            b".!saiv 1 acme/langs\n(/name min=1 max=40)\n!str\n/^[a-z]{2,3}(-[a-z0-9]{2,9})?$/=\n()\n",
+            b".!saiv acme/langs\n(/name min=1 max=40)\n!str\n/^[a-z]{2,3}(-[a-z0-9]{2,9})?$/=\n()\n",
         )
         .unwrap();
         assert_eq!(
             out,
-            ".!csaiv 1 acme/langs\n\
+            ".!csaiv acme/langs\n\
              /name [key::/^[a-z]{2,3}(-[a-z0-9]{2,9})?$/] [min=1] [max=40]\n\
              !str'/name::=\n"
         );
         // Key grammar without bounds; typed entry values; under an
         // enclosing namespace.
         let out = compile_schema(
-            b".!saiv 1 acme/cfg\n(/config)\n(/settings max=100)\n!int\n/^[a-z][a-z0-9_]*$/=\n()\n()\n",
+            b".!saiv acme/cfg\n(/config)\n(/settings max=100)\n!int\n/^[a-z][a-z0-9_]*$/=\n()\n()\n",
         )
         .unwrap();
         assert_eq!(
             out,
-            ".!csaiv 1 acme/cfg\n\
+            ".!csaiv acme/cfg\n\
              /config/settings [key::/^[a-z][a-z0-9_]*$/] [max=100]\n\
              !int /^-?[0-9]+$/ ..num'/config/settings::=\n"
         );
@@ -1275,23 +1291,23 @@ mod tests {
         // entry — is outside the D-2 scope: clear compile error.
         assert_eq!(
             compile_schema(
-                b".!saiv 1 a/m\n(/name min=1)\n!str\n/^[a-z]+$/=\ntimeout=30\n()\n"
+                b".!saiv a/m\n(/name min=1)\n!str\n/^[a-z]+$/=\ntimeout=30\n()\n"
             ),
             ic(5)
         );
         // Bounds on a block that never declares its key grammar.
         assert_eq!(
-            compile_schema(b".!saiv 1 a/m\n(/name min=1)\n!str\nhost=\n()\n"),
+            compile_schema(b".!saiv a/m\n(/name min=1)\n!str\nhost=\n()\n"),
             ic(5)
         );
         // A key line beside ordinary members, or outside any block.
         assert_eq!(
-            compile_schema(b".!saiv 1 a/m\n(/name)\nhost=\n/^[a-z]+$/=\n()\n"),
+            compile_schema(b".!saiv a/m\n(/name)\nhost=\n/^[a-z]+$/=\n()\n"),
             ic(4)
         );
-        assert_eq!(compile_schema(b".!saiv 1 a/m\n/^[a-z]+$/=\n"), ic(2));
+        assert_eq!(compile_schema(b".!saiv a/m\n/^[a-z]+$/=\n"), ic(2));
         // The flat unkeyed form stays valid alongside.
-        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>\nsettings=\n").is_ok());
+        assert!(compile_schema(b".!saiv a/m\n!map<int>\nsettings=\n").is_ok());
     }
 
     #[test]
@@ -1301,7 +1317,7 @@ mod tests {
         // static and backend-independent — INVALID_CONSTRAINT at
         // schema-compile time, never deferred to validation.
         for bad in ["123", "de--phonebk", "toolongsubtag123", ""] {
-            let saiv = format!(".!saiv 1 a/l\n..lex[{bad}]\nname=\n");
+            let saiv = format!(".!saiv a/l\n..lex[{bad}]\nname=\n");
             assert_eq!(
                 compile_schema(saiv.as_bytes()),
                 Err(PipelineError::Lex(LexErrorAt {
@@ -1315,12 +1331,12 @@ mod tests {
         // (zz: a validation-time CollationUnsupportedError) and the
         // explicit root request.
         for ok in ["zz", "und", "fr-CA", "de-DE-u-co-phonebk"] {
-            let saiv = format!(".!saiv 1 a/l\n..lex[{ok}]\nname=\n");
+            let saiv = format!(".!saiv a/l\n..lex[{ok}]\nname=\n");
             assert!(compile_schema(saiv.as_bytes()).is_ok(), "{ok}");
         }
         // The same check covers `.taiv` publish-time validation.
         assert!(check_type_lib(
-            b".!taiv 1 acme/l\n\n/^.+$/ ..lex[123]\n&name=\n",
+            b".!taiv acme/l\n\n/^.+$/ ..lex[123]\n&name=\n",
             &dead_end()
         )
         .is_err());
@@ -1328,14 +1344,14 @@ mod tests {
 
     #[test]
     fn unit_or_constraints_on_map_type_are_rejected() {
-        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>:km\nsettings=\n").is_err());
-        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>[1,5]\nsettings=\n").is_err());
-        assert!(compile_schema(b".!saiv 1 a/m\n!map<int>\nsettings=\n").is_ok());
+        assert!(compile_schema(b".!saiv a/m\n!map<int>:km\nsettings=\n").is_err());
+        assert!(compile_schema(b".!saiv a/m\n!map<int>[1,5]\nsettings=\n").is_err());
+        assert!(compile_schema(b".!saiv a/m\n!map<int>\nsettings=\n").is_ok());
     }
 
     #[test]
     fn empty_pattern_field_is_not_swallowed_as_comment() {
-        let out = compile_schema(b".!saiv 1 a/p\n!str//\nname=\n").unwrap();
+        let out = compile_schema(b".!saiv a/p\n!str//\nname=\n").unwrap();
         for line in out.lines() {
             assert!(
                 !line.trim_start().starts_with("//"),
@@ -1373,14 +1389,14 @@ mod tests {
     fn check_type_lib_lowers_all_definitions() {
         // Same-library &name reference and a core base type both
         // resolve without any external fetch.
-        let ok = b".!taiv 1 acme/net\n\n!int[1,65535]\n&port=\n\n&port [80,443]\n&webport=\n";
+        let ok = b".!taiv acme/net\n\n!int[1,65535]\n&port=\n\n&port [80,443]\n&webport=\n";
         let lib = check_type_lib(ok, &dead_end()).unwrap();
         assert_eq!(lib.library, "acme/net");
         assert_eq!(lib.types.len(), 2);
 
         // A cross-library base reference to an unpublished library
         // fails, and the missing artifact is recorded for the host.
-        let dangling = b".!taiv 1 acme/net\n\n!other/lib/base\n&derived=\n";
+        let dangling = b".!taiv acme/net\n\n!other/lib/base\n&derived=\n";
         let r = dead_end();
         assert!(check_type_lib(dangling, &r).is_err());
         assert_eq!(
@@ -1394,9 +1410,9 @@ mod tests {
 
     #[test]
     fn unit_on_non_numeric_type_is_rejected() {
-        assert!(compile_schema(b".!saiv 1 a/u\n!str:km\ndist=\n").is_err());
+        assert!(compile_schema(b".!saiv a/u\n!str:km\ndist=\n").is_err());
         // A numeric type is fine.
-        assert!(compile_schema(b".!saiv 1 a/u\n!float:km\ndist=\n").is_ok());
+        assert!(compile_schema(b".!saiv a/u\n!float:km\ndist=\n").is_ok());
     }
 
     #[test]
@@ -1404,8 +1420,8 @@ mod tests {
         // `!text` lowers to no value constraints but the type item
         // survives into .csaiv — the annotation carries export
         // semantics, so the parallel scan enforces it.
-        let out = compile_schema(b".!saiv 1 a/n\n!text\nnote=\n").unwrap();
-        assert_eq!(out, ".!csaiv 1 a/n\n!text'::note=\n");
+        let out = compile_schema(b".!saiv a/n\n!text\nnote=\n").unwrap();
+        assert_eq!(out, ".!csaiv a/n\n!text'::note=\n");
         let sc = crate::validator::parse_csaiv(&out).unwrap();
         assert!(crate::validate(".!daiv\n!text'::note=a|:|b\n", &sc).is_ok());
         // str→text coercion: a plain string satisfies a text field —
@@ -1422,7 +1438,7 @@ mod tests {
             crate::validate(".!daiv\n!int'::note=1\n", &sc).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
         );
-        let strsc = crate::validator::parse_csaiv(".!csaiv 1 a/s\n!str'::note=\n").unwrap();
+        let strsc = crate::validator::parse_csaiv(".!csaiv a/s\n!str'::note=\n").unwrap();
         assert_eq!(
             crate::validate(".!daiv\n!text'::note=a\n", &strsc).map_err(|e| e.error),
             Err(AppError::TypeMismatch)
@@ -1438,12 +1454,12 @@ mod tests {
         // the .taiv definition shape above a field — implicit str,
         // lowered to a bare constraint group like !str + items.
         let csaiv = compile_schema(
-            b".!saiv 1 a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
+            b".!saiv a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
         )
         .unwrap();
         assert_eq!(
             csaiv,
-            ".!csaiv 1 a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
+            ".!csaiv a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
         );
     }
 
@@ -1452,15 +1468,15 @@ mod tests {
         // A type-reference item has its own line forms; a `?`
         // provenance list and a stray no-`=` line have no .saiv
         // meaning. All reject rather than silently dropping.
-        assert!(compile_schema(b".!saiv 1 a/c\n/^[a-z]+$/ &port\nname=\n").is_err());
-        assert!(compile_schema(b".!saiv 1 a/c\n?required\nname=\n").is_err());
-        assert!(compile_schema(b".!saiv 1 a/c\nstray words\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv a/c\n/^[a-z]+$/ &port\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv a/c\n?required\nname=\n").is_err());
+        assert!(compile_schema(b".!saiv a/c\nstray words\nname=\n").is_err());
     }
 
     #[test]
     fn duplicate_schema_field_is_an_error() {
         assert_eq!(
-            compile_schema(b".!saiv 1 a/d\nhost=\nhost=\n"),
+            compile_schema(b".!saiv a/d\nhost=\nhost=\n"),
             Err(PipelineError::App(AppError::SchemaDuplicateKey))
         );
     }
@@ -1469,7 +1485,7 @@ mod tests {
     fn url_reference_is_resolution_error() {
         // Network layers are unimplemented offline (SPEC.md § Type
         // Registry Resolution) — URL references fail loudly.
-        let saiv = b".!saiv 1 acme/x\n.!schema https://example.org/base.saiv\n";
+        let saiv = b".!saiv acme/x\n.!schema https://example.org/base.saiv\n";
         assert_eq!(
             compile_schema(saiv),
             Err(PipelineError::App(AppError::SchemaResolution))

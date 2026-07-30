@@ -1,4 +1,4 @@
-.!taiv 1 std/enc
+.!taiv std/enc
 
 // Encoding library: base64url-embedded content, the decoded payload
 // typed by name. Every type derives from b64; the type name states

@@ -121,7 +121,7 @@ pub fn import_schema(
         Shape::Complex(ct) => ctx.complex_fields(ct, &root_path, false, &mut Vec::new())?,
         Shape::Scalar(_) => return Err(err("the root element is scalar; nothing to convert")),
     }
-    let mut out = format!(".!saiv 1 {name}\n");
+    let mut out = format!(".!saiv {name}\n");
     for lib in &ctx.imports {
         out.push_str(&format!(".!types {lib}\n"));
     }
@@ -920,7 +920,7 @@ mod tests {
     #[test]
     fn core_mapping() {
         let saiv = import_schema(XSD.as_bytes(), None, "acme/config").unwrap();
-        assert!(saiv.starts_with(".!saiv 1 acme/config\n"));
+        assert!(saiv.starts_with(".!saiv acme/config\n"));
         assert!(saiv.contains("/config::\"@env\"=\n"));
         assert!(saiv.contains("/config::name=\n"));
         assert!(saiv.contains("!int[-2147483648,2147483647]\n/config::port=\n"));
