@@ -82,7 +82,7 @@ pub use compiler::{compile, compile_with};
 pub use config::Config;
 pub use denorm::{denormalize, denormalize_with};
 pub use doc::{Doc, FromDaiv, Typed, View};
-pub use fmt::{format_data, format_plain, lift};
+pub use fmt::{format_data, format_plain, unbuild};
 pub use error::{AppError, AppErrorAt, LexError, LexErrorAt, PipelineError};
 pub use lexer::{lex, FileKind};
 pub use resolve::{ResolutionEvent, ResolutionLayer, Resolver};

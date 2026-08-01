@@ -60,17 +60,21 @@ COMMANDS:
                                       document's .!schema declarations
                                       from the registries
     unit     <expr>                   canonicalize a unit expression
-    fmt      [file] [-w] [--check]    format an authoring file into the
-                                      standard style (stdin when the
-                                      file is omitted or `-`); a
-                                      canonical .daiv/.raiv input is
-                                      rendered as idiomatic authored
-                                      .kaiv instead (a view - sugar the
-                                      compiler resolved away does not
-                                      come back); -w rewrites the file
-                                      in place, --check exits 1 if the
-                                      file is not already formatted
-                                      (both authoring files only)
+    fmt      [file] [--check]         format an authoring file into the
+                                      standard style, in place; stdin
+                                      (omitted or `-`) prints to
+                                      stdout; --check exits 1 if the
+                                      file is not already formatted;
+                                      canonical .daiv/.raiv have
+                                      exactly one spelling - see
+                                      unbuild
+    unbuild  [file]                   canonical .daiv/.raiv -> authored
+                                      .kaiv on stdout (build's inverse
+                                      direction, and a view: sugar the
+                                      compiler resolved away - comments,
+                                      variables, references - does not
+                                      come back; .raiv preserves more,
+                                      authored units included)
     mapping  validate <map.maiv>      check a mapping against its two
                                       schemas (namepaths, overrides,
                                       required-field completeness)
@@ -430,6 +434,12 @@ fn run_text(args: &[String]) -> Result<String, String> {
             None => Ok("No stored session.\n".into()),
         },
         ("fmt", rest) => fmt_cmd(rest),
+        ("unbuild", rest) if rest.len() <= 1 => {
+            let data = read_input(rest.first().map(String::as_str))?;
+            let text = String::from_utf8(data).map_err(|e| e.to_string())?;
+            kaiv::unbuild(&text).map_err(|e| e.to_string())
+        }
+        ("unbuild", _) => Err("unbuild takes at most one file (got extra arguments); see `kaiv help`".into()),
         ("unit", [expr]) => kaiv::unit::canonicalize(expr)
             .map(|c| format!("{c}\n"))
             .ok_or_else(|| {
@@ -827,7 +837,8 @@ fn fmt_cmd(rest: &[String]) -> Result<String, String> {
     for k in ["csaiv", "msaiv"] {
         if opens_with_kind(&text, k) || ext.ends_with(&format!(".{k}")) {
             return Err(format!(
-                ".{k} is a compiled artifact, not an authoring surface;                  fmt formats what humans write"
+                ".{k} is a compiled artifact, not an authoring surface; \
+                 fmt formats what humans write"
             ));
         }
     }
@@ -836,16 +847,11 @@ fn fmt_cmd(rest: &[String]) -> Result<String, String> {
         || ((ext.ends_with(".daiv") || ext.ends_with(".raiv"))
             && !opens_with_kind(&text, "kaiv"));
     if canonical {
-        if write {
-            return Err(
-                "-w would replace a canonical file with authored kaiv;                  redirect the output instead"
-                    .into(),
-            );
-        }
-        if check {
-            return Err("--check applies to authoring files only".into());
-        }
-        return kaiv::lift(&text).map_err(|e| e.to_string());
+        return Err(
+            "canonical .daiv/.raiv has exactly one spelling — nothing to format; \
+             to reconstruct authored kaiv, run: kaiv unbuild"
+                .into(),
+        );
     }
     let plain_kind = [
         ("saiv", kaiv::FileKind::Schema),
@@ -862,16 +868,17 @@ fn fmt_cmd(rest: &[String]) -> Result<String, String> {
     if check {
         if out != text {
             return Err(match path.as_deref() {
-                Some(p) => format!("{p} is not formatted (run: kaiv fmt -w {p})"),
+                Some(p) => format!("{p} is not formatted (run: kaiv fmt {p})"),
                 None => "input is not formatted".into(),
             });
         }
         return Ok(String::new());
     }
-    if write {
-        let Some(p) = path.as_deref() else {
-            return Err("-w needs a file (stdin has nowhere to write back)".into());
-        };
+    // A file argument formats in place (like rustfmt); stdin
+    // prints to stdout. -w is accepted for compatibility — it
+    // names what is now the default.
+    let _ = write;
+    if let Some(p) = path.as_deref() {
         if out != text {
             std::fs::write(p, &out).map_err(|e| format!("cannot write {p}: {e}"))?;
         }

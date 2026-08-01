@@ -390,10 +390,10 @@ impl KaivBuilder {
     /// that reads better), and dollar signs in values re-author as
     /// the `$$` escape.
     pub fn finish(&self) -> Result<String, PipelineError> {
-        // The inner document is canonical-shaped; hand it to the
-        // formatter's lift under its canonical declaration.
+        // The inner document is canonical-shaped; hand it to
+        // unbuild under its canonical declaration.
         let daiv = self.inner.finish().replacen(".!kaiv\n", ".!daiv\n", 1);
-        crate::fmt::lift(&daiv)
+        crate::fmt::unbuild(&daiv)
     }
 }
 

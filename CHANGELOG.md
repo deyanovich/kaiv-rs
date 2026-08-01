@@ -7,6 +7,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.11.0] - 2026-08-01
+---------------------
+
+### Changed
+
+- **The fmt/unbuild split: the formatter formats, `unbuild`
+  inverts `build`.** The library renames `fmt::lift` to
+  `fmt::unbuild` (breaking) — the old name collided with the
+  spec's *head-type lift*, an unrelated Denormalizer concept.
+  `kaiv fmt` is now a formatter with the full social contract:
+  authoring surfaces only, **in place by default** on a file
+  argument (stdin still prints; `-w` remains as a compatible
+  spelling of the default; `--check` unchanged); pointed at a
+  canonical `.daiv`/`.raiv` it refuses — under
+  byte-deterministic emission a canonical stream has exactly
+  one spelling — and directs to the new verb. `kaiv unbuild
+  [file]` renders canonical `.daiv`/`.raiv` as idiomatic
+  authored `.kaiv` on stdout (a view: sugar the compiler
+  resolved away — comments, variables, references — does not
+  come back; `.raiv` preserves more, authored units included).
+  kaiv-wasm gains the matching `unbuild` export.
+
 [0.10.0] - 2026-07-31
 ---------------------
 

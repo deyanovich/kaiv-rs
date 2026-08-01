@@ -226,6 +226,18 @@ pub fn fmt(input: &str) -> String {
     }
 }
 
+/// Canonical `.daiv`/`.raiv` -> idiomatic authored `.kaiv`: the
+/// inverse direction of `build`, and a view — sugar the compiler
+/// resolved away (comments, variables, references) does not come
+/// back; `.raiv` preserves more, authored units included.
+#[wasm_bindgen]
+pub fn unbuild(input: &str) -> String {
+    match kaiv::unbuild(input) {
+        Ok(t) => ok(t),
+        Err(e) => err(e),
+    }
+}
+
 /// Authored `.kaiv` -> canonical `.daiv`, with an in-memory
 /// `.saiv` preloaded into the resolver so a `.!schema:` reference
 /// resolves without a registry — the playground's schema pane fed

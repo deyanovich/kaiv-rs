@@ -1,7 +1,7 @@
 //! `kaiv fmt` — the standard formatter for authoring files.
 //!
 //! Two entry points, one style. [`format_data`] normalizes an
-//! authored `.kaiv` stream into the standard style; [`lift`] renders
+//! authored `.kaiv` stream into the standard style; [`unbuild`] renders
 //! a canonical `.raiv`/`.daiv` stream *as* idiomatic authored kaiv
 //! (the human view of a machine artifact). Both share one emitter,
 //! so the pretty form is defined once.
@@ -625,7 +625,7 @@ fn replay_region(region: &[crate::lexer::Line<'_>], tracker: &mut Tracker) {
     }
 }
 
-// ── the canonical front-end (lift) ──────────────────────────────
+// ── the canonical front-end (unbuild) ──────────────────────────────
 
 /// Parse a canonical `.raiv`/`.daiv` stream into the model. The
 /// format declaration becomes `.!kaiv`; metadata prefixes become
@@ -1178,18 +1178,19 @@ pub fn format_data(input: &str) -> Result<String, PipelineError> {
     Ok(render(shebang, nodes))
 }
 
-/// Render a canonical `.raiv`/`.daiv` stream as idiomatic authored
-/// kaiv. This is a *view*: authoring sugar that compilation
-/// resolved away (variables, references, shorthands) does not come
-/// back, and the result is an authored `.kaiv` document, not the
-/// canonical artifact.
-pub fn lift(input: &str) -> Result<String, PipelineError> {
+/// Unbuild: render a canonical `.daiv`/`.raiv` stream as idiomatic
+/// authored kaiv — the inverse direction of `build`, and a *view*:
+/// authoring sugar that compilation resolved away (variables,
+/// references, shorthands) does not come back, and the result is
+/// an authored `.kaiv` document, not the canonical artifact.
+/// (Unrelated to the Denormalizer's head-type lift.)
+pub fn unbuild(input: &str) -> Result<String, PipelineError> {
     let which = ["daiv", "raiv"]
         .iter()
         .find(|k| crate::lexer::expect_kind(input, k).is_ok());
     let Some(kind) = which else {
         return Err(PipelineError::Other(
-            "lift expects a canonical .daiv or .raiv stream (with its format declaration)".into(),
+            "unbuild expects a canonical .daiv or .raiv stream (with its format declaration)".into(),
         ));
     };
     let nodes = parse_canonical(input, *kind == "daiv")?;
@@ -1319,9 +1320,9 @@ mod tests {
     }
 
     #[test]
-    fn lift_groups_and_types() {
+    fn unbuild_groups_and_types() {
         let daiv = ".!daiv\n!str'::title=hi\n!str'/owner::name=Ada\n!bool'/owner::active=true\n!str'/@m/0::host=a\n!str'/@m/1::host=b\n";
-        let out = lift(daiv).unwrap();
+        let out = unbuild(daiv).unwrap();
         assert_eq!(
             out,
             ".!kaiv\n\ntitle=hi\n\n(/owner)\nname=Ada\n!bool\nactive=true\n()\n\n/@m+:=host=a\n/@m+:=host=b\n"
@@ -1329,14 +1330,14 @@ mod tests {
     }
 
     #[test]
-    fn lift_provenance() {
+    fn unbuild_provenance() {
         let daiv = ".!daiv\n!str?sensor@20260101T000000Z'::t=21\n";
-        assert_eq!(lift(daiv).unwrap(), ".!kaiv\n\n?sensor@20260101T000000Z\nt=21\n");
+        assert_eq!(unbuild(daiv).unwrap(), ".!kaiv\n\n?sensor@20260101T000000Z\nt=21\n");
     }
 
     #[test]
     fn lift_refuses_authored() {
-        assert!(lift(".!kaiv\nx=1\n").is_err());
+        assert!(unbuild(".!kaiv\nx=1\n").is_err());
     }
 
     #[test]

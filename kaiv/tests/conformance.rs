@@ -406,7 +406,7 @@ fn fmt_preserves_compilation() {
 }
 
 #[test]
-fn lift_round_trips() {
+fn unbuild_round_trips() {
     // Lifting a canonical .daiv to authored kaiv and rebuilding it
     // reproduces the identical .daiv.
     let mut failures = Vec::new();
@@ -420,22 +420,22 @@ fn lift_round_trips() {
         }
         let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
         let resolver = resolver_for(&dir);
-        let lifted = match kaiv::lift(&daiv) {
+        let unbuilt = match kaiv::unbuild(&daiv) {
             Ok(l) => l,
             Err(e) => {
-                failures.push(format!("{name}: lift failed: {e:?}"));
+                failures.push(format!("{name}: unbuild failed: {e:?}"));
                 continue;
             }
         };
-        let rebuilt = kaiv::compile_with(lifted.as_bytes(), &resolver)
+        let rebuilt = kaiv::compile_with(unbuilt.as_bytes(), &resolver)
             .and_then(|r| kaiv::denormalize_with(&r, &resolver));
         match rebuilt {
             Ok(d2) if d2 == daiv => {}
             Ok(d2) => failures.push(format!(
-                "{name}: lift round-trip drifted\n--- lifted ---\n{lifted}--- rebuilt ---\n{d2}--- want ---\n{daiv}"
+                "{name}: unbuild round-trip drifted\n--- unbuilt ---\n{unbuilt}--- rebuilt ---\n{d2}--- want ---\n{daiv}"
             )),
             Err(e) => failures.push(format!(
-                "{name}: lifted form does not build: {e:?}\n--- lifted ---\n{lifted}"
+                "{name}: unbuilt form does not build: {e:?}\n--- unbuilt ---\n{unbuilt}"
             )),
         }
     }
