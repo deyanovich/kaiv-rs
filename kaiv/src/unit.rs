@@ -471,11 +471,8 @@ fn name_exact(name: &str) -> Option<(i128, i32)> {
 
 /// The exact factor of a unit expression as numerator/denominator
 /// mantissas and a power of ten: factor = (num/den) × 10^e10.
-fn expr_exact(expr: &str) -> Option<(i128, i128, i32)> {
-    expr_exact_with(expr, &BTreeMap::new(), 0)
-}
-
-/// [`expr_exact`] over the built-in tables plus a document's
+/// The exact rational factor of a unit expression, over the
+/// built-in tables plus a document's
 /// imported custom-unit definitions. A custom name is exact when
 /// its declared factor parses as a finite decimal and its
 /// dimension expression is itself exact, recursively (aliases
