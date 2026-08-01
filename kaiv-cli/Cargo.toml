@@ -17,7 +17,7 @@ name = "kaiv"
 path = "src/main.rs"
 
 [dependencies]
-kaiv = { path = "../kaiv", version = "0.9.0", features = ["json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
+kaiv = { path = "../kaiv", version = "0.10.0", features = ["json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
 # Already in the tree via kaiv's default `net` feature; declared
 # here so the login flow (account.rs) can drive it directly.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }

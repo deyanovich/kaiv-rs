@@ -120,9 +120,12 @@ pub fn parse_maiv(input: &[u8]) -> Result<Mapping, PipelineError> {
         v.ok_or_else(|| PipelineError::Other(format!(".maiv is missing its {what} declaration")))
     };
     if !seen_maiv {
-        return Err(PipelineError::Other(
-            ".maiv is missing its .!maiv format declaration".into(),
-        ));
+        // The REQUIRED header gate is FORMAT_KIND (SPEC.md
+        // § Format Declaration, § Errors).
+        return Err(PipelineError::Lex(crate::error::LexErrorAt {
+            error: crate::error::LexError::FormatKind,
+            line: 1,
+        }));
     }
     Ok(Mapping {
         source: need(".!source", source)?,
@@ -477,7 +480,9 @@ pub fn apply(
     }
     // Materialize the target schema's absent optional fields — the
     // output is a complete deployment artifact (§ Null Semantics).
-    crate::denorm::materialize(&out, tgt)
+    // No custom-unit context here: a mapped document's units are
+    // already the target schema's declared ones.
+    crate::denorm::materialize(&out, tgt, &std::collections::BTreeMap::new())
 }
 
 /// Compose two mappings (SPEC.md § Composition): given `b`←`a` with

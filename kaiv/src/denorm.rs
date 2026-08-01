@@ -16,7 +16,7 @@ use crate::resolve::Resolver;
 use crate::validator::{
     is_collection, line_matches, ns_arr_parts, split_element, CompiledSchema, SchemaField,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Schema-unaware core: reference resolution only. Documents that
 /// declare a schema need [`denormalize_with`] for the materialization
@@ -56,7 +56,10 @@ pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
                 }
             }
         }
-        out.push_str(line);
+        match resolve_elided_float(line) {
+            Some(r) => out.push_str(&r),
+            None => out.push_str(line),
+        }
     }
     Ok(out)
 }
@@ -76,8 +79,43 @@ pub fn denormalize_with(raiv: &str, resolver: &Resolver) -> Result<String, Pipel
     let daiv = denormalize(raiv)?;
     match crate::validator::schema_for_daiv(&daiv, resolver)? {
         None => Ok(daiv),
-        Some(schema) => materialize(&daiv, &schema),
+        Some(schema) => {
+            let customs = custom_units(&daiv, resolver)?;
+            materialize(&daiv, &schema, &customs)
+        }
     }
+}
+
+/// The document's imported custom-unit definitions (`.!units` →
+/// `.faiv`), merged in declaration order (first definition wins),
+/// for the D-14 conversion: the spec resolves conversion factors
+/// from the built-in tables *and* the imported `.faiv` definitions
+/// (SPEC.md § Authored-Unit Conversion).
+fn custom_units(
+    daiv: &str,
+    resolver: &Resolver,
+) -> Result<BTreeMap<String, crate::faiv::UnitDef>, PipelineError> {
+    let mut layer1: Vec<(String, String)> = Vec::new();
+    let mut libs: Vec<String> = Vec::new();
+    for raw in daiv.lines() {
+        let s = raw.trim_start_matches([' ', '\t']);
+        if let Some(rest) = s.strip_prefix(".!units") {
+            if let Some(lib) = rest.split_ascii_whitespace().next() {
+                libs.push(lib.to_string());
+            }
+        } else if let Some(rest) = s.strip_prefix(".!registry") {
+            if let Some((p, b)) = rest.trim_matches([' ', '\t']).split_once('=') {
+                layer1.push((p.to_string(), b.to_string()));
+            }
+        }
+    }
+    let mut map = BTreeMap::new();
+    for lib in &libs {
+        for (name, def) in resolver.unit_defs(lib, &layer1)? {
+            map.entry(name).or_insert(def);
+        }
+    }
+    Ok(map)
 }
 
 /// Merge-walk the resolved document against the compiled schema's
@@ -87,7 +125,11 @@ pub fn denormalize_with(raiv: &str, resolver: &Resolver) -> Result<String, Pipel
 /// a build-time `RequiredFieldSchemaError`. Out-of-order or undefined
 /// data lines pass through untouched — ordering is the Validator's
 /// verdict, not the Denormalizer's to repair.
-pub(crate) fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String, PipelineError> {
+pub(crate) fn materialize(
+    daiv: &str,
+    schema: &CompiledSchema,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+) -> Result<String, PipelineError> {
     let lines: Vec<&str> = daiv.split_inclusive('\n').collect();
     // Line namepaths (None for declarations/comments/blank lines).
     let nps: Vec<Option<String>> = lines.iter().map(|l| namepath_of(l)).collect();
@@ -107,9 +149,13 @@ pub(crate) fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String,
             di += 1;
             continue;
         };
-        // Undefined field: emit as-is, keep the schema pointer.
+        // Undefined field: emit as-is, keep the schema pointer —
+        // an elided-type annotation resolves to float (D-15).
         if !fields.iter().any(|f| line_matches(f, np)) {
-            out.push_str(lines[di]);
+            match resolve_elided_float(lines[di]) {
+                Some(r) => out.push_str(&r),
+                None => out.push_str(lines[di]),
+            }
             di += 1;
             continue;
         }
@@ -141,12 +187,13 @@ pub(crate) fn materialize(daiv: &str, schema: &CompiledSchema) -> Result<String,
                 &nps,
                 di,
                 eol,
+                customs,
                 &mut out,
             )?;
             si = gend;
             continue;
         }
-        emit_matched(&fields[si], lines[di], &mut out)?;
+        emit_matched(&fields[si], lines[di], customs, &mut out)?;
         // Map-entry and scalar-array element lines consume a run;
         // the pointer stays until the namepath prefix changes.
         if !crate::validator::is_map_entry(&fields[si])
@@ -175,6 +222,7 @@ fn materialize_ns_array(
     nps: &[Option<String>],
     mut di: usize,
     eol: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
     out: &mut String,
 ) -> Result<usize, PipelineError> {
     let prefix = format!("{arr}/");
@@ -222,7 +270,7 @@ fn materialize_ns_array(
                     emit_absent_element(g, &elem_fields, arr, idx, eol, out)?;
                 }
                 gj = gk + 1;
-                emit_matched(&group[gk], lines[k], out)?;
+                emit_matched(&group[gk], lines[k], customs, out)?;
             } else {
                 out.push_str(lines[k]);
             }
@@ -244,9 +292,25 @@ fn materialize_ns_array(
 /// would be silently reinterpreted as line breaks, so it is a
 /// `DelimiterCollisionError` instead. Union heads never lift — the
 /// data line's annotation is the authored discriminant.
-fn emit_matched(f: &SchemaField, line: &str, out: &mut String) -> Result<(), PipelineError> {
+fn emit_matched(
+    f: &SchemaField,
+    line: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+    out: &mut String,
+) -> Result<(), PipelineError> {
     if let Some(head) = field_head(f) {
-        let body = line.trim_start_matches([' ', '\t']);
+        let body0 = line.trim_start_matches([' ', '\t']);
+        let indent = &line[..line.len() - body0.len()];
+        // The elided-type annotation inherits the governing head's
+        // name (D-15); its authored unit then flows through the
+        // ordinary D-14 conversion below (same unit: no-op;
+        // unit-less or non-numeric head: the Validator's mismatch
+        // stands on the inherited form).
+        let elided: Option<String> = body0.strip_prefix("!:").map(|rest| {
+            let name = head.split_once(':').map_or(head.as_str(), |(n, _)| n);
+            format!("{name}:{rest}")
+        });
+        let body: &str = elided.as_deref().unwrap_or(body0);
         if let Some(rest) = body.strip_prefix("!str") {
             if rest.starts_with(['\'', '?']) {
                 if head == "!text" {
@@ -258,15 +322,115 @@ fn emit_matched(f: &SchemaField, line: &str, out: &mut String) -> Result<(), Pip
                         }
                     }
                 }
-                out.push_str(&line[..line.len() - body.len()]);
+                out.push_str(indent);
                 out.push_str(&head);
                 out.push_str(rest);
                 return Ok(());
             }
         }
+        // Authored-unit conversion (SPEC.md § Authored-Unit
+        // Conversion, D-14): an annotated line whose unit differs
+        // from the head's declared unit converts into the declared
+        // unit — exactly, or not at all. Currencies and
+        // cross-dimension units fall through untouched (the
+        // Validator's mismatch stands); a same-dimension result
+        // that is not a finite decimal, or that violates the
+        // field's pattern, is a build error. `.raiv` keeps the
+        // authored unit; only the deployment artifact converts.
+        if let Some((_, declared)) = head.split_once(':') {
+            if !head.contains('|') && !declared.contains('~') {
+                if let Some(cv) = convert_line(f, body, declared, customs) {
+                    let (prefix, converted, tail) = cv?;
+                    out.push_str(indent);
+                    out.push_str(&prefix);
+                    out.push_str(&converted);
+                    out.push_str(tail);
+                    return Ok(());
+                }
+            }
+        }
+        // An elided line no branch consumed (same unit already, or
+        // a unit-less/non-numeric head) is emitted in its inherited
+        // form — the `!:` prefix never reaches `.daiv`.
+        if let Some(e) = &elided {
+            out.push_str(indent);
+            out.push_str(e);
+            return Ok(());
+        }
     }
     out.push_str(line);
     Ok(())
+}
+
+/// The elided-type annotation with no governing head (a schemaless
+/// document, or an undefined field under a relaxed schema)
+/// resolves to `float`, the authored unit standing (D-15).
+fn resolve_elided_float(line: &str) -> Option<String> {
+    let body = line.trim_start_matches([' ', '\t']);
+    let rest = body.strip_prefix("!:")?;
+    let indent = &line[..line.len() - body.len()];
+    Some(format!("{indent}!float:{rest}"))
+}
+
+/// The D-14 conversion for one annotated line under a
+/// unit-carrying head: `Some` when the line carries a different,
+/// same-dimension, exactly-factorable unit — the rebuilt line
+/// through `=`, the converted value, and the line's tail (EOL).
+/// `None` leaves the line untouched for the Validator to judge.
+#[allow(clippy::type_complexity)]
+fn convert_line<'l>(
+    f: &SchemaField,
+    body: &'l str,
+    declared: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+) -> Option<Result<(String, String, &'l str), PipelineError>> {
+    let apos = body.find('\'')?;
+    let a = crate::anno::parse_annotation(&body[..apos])?;
+    let u = a.unit?;
+    if u.contains('~') {
+        return None; // currencies never convert (no factors)
+    }
+    let cu = crate::unit::canonicalize(&u)?;
+    if cu == declared {
+        return None; // already the declared unit
+    }
+    let after = &body[apos..];
+    let eq = crate::validator::first_eq(after)?;
+    let val_and_end = &after[eq + 1..];
+    let val = val_and_end.trim_end_matches(['\n', '\r']);
+    let tail = &val_and_end[val.len()..];
+    let nv = match crate::unit::convert_with(val, &cu, declared, customs) {
+        crate::unit::Convert::Converted(nv) => nv,
+        crate::unit::Convert::NotConvertible => return None,
+        crate::unit::Convert::Inexact => {
+            return Some(Err(PipelineError::App(AppError::UnitConversion)))
+        }
+    };
+    // The converted value must still satisfy the field's type — a
+    // non-integer result on an int-derived field is a conversion
+    // error, not a downstream constraint surprise.
+    for it in &f.items {
+        if let crate::anno::Item::Constraint(crate::anno::Constraint::Pattern(p)) = it {
+            let ok = crate::rex::Regex::new(p)
+                .map(|re| re.is_match(&nv))
+                .unwrap_or(false);
+            if !ok {
+                return Some(Err(PipelineError::App(AppError::UnitConversion)));
+            }
+        }
+    }
+    // Swap the authored unit for the declared one: the unit is the
+    // last `:`-introduced token of the prefix, textually exactly
+    // the authored spelling.
+    let pat = format!(":{u}");
+    let pos = body[..apos].rfind(&pat)?;
+    let mut prefix = String::new();
+    prefix.push_str(&body[..pos]);
+    prefix.push(':');
+    prefix.push_str(declared);
+    prefix.push_str(&body[pos + pat.len()..apos]);
+    prefix.push_str(&after[..eq + 1]);
+    Some(Ok((prefix, nv, tail)))
 }
 
 /// The compiled field's retained head type token (`!text`,

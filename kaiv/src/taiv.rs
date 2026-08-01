@@ -80,9 +80,12 @@ pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
         ));
     }
     if library.is_empty() {
-        return Err(PipelineError::Other(
-            "missing .!taiv declaration in .taiv".into(),
-        ));
+        // The REQUIRED header gate is FORMAT_KIND (SPEC.md
+        // § Format Declaration, § Errors).
+        return Err(PipelineError::Lex(crate::error::LexErrorAt {
+            error: crate::error::LexError::FormatKind,
+            line: 1,
+        }));
     }
     Ok(TypeLib { library, types })
 }
@@ -192,7 +195,7 @@ mod tests {
         let b64 = &core.types["b64"];
         assert!(matches!(
             &b64.items[0],
-            Item::Constraint(Constraint::Pattern(p)) if p == "^[A-Za-z0-9_-]*$"
+            Item::Constraint(Constraint::Pattern(p)) if p == "^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$"
         ));
         assert_eq!(b64.default, ""); // core types carry the inert default
     }

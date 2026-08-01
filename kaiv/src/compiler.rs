@@ -28,6 +28,24 @@ pub fn compile_with(input: &[u8], resolver: &Resolver) -> Result<String, Pipelin
     if c.pending_anno.is_some() || c.pending_prov.is_some() {
         return Err(PipelineError::App(AppError::MetadataWithoutTarget));
     }
+    // Scoped `.!schema` declarations (block discriminants, D-10)
+    // join the leading declaration run — declarations precede
+    // content in canonical form.
+    if !c.scoped_schemas.is_empty() {
+        let mut at = 0;
+        while at < c.out.len() {
+            let t = c.out[at].trim_start_matches([' ', '\t']);
+            if t.starts_with(".!") || t.starts_with(".?") {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        let scoped = std::mem::take(&mut c.scoped_schemas);
+        for (i, d) in scoped.into_iter().enumerate() {
+            c.out.insert(at + i, d);
+        }
+    }
     // Canonical output always opens with its kind's declaration
     // (SPEC.md § Format Declaration) — the authored `.!kaiv` (or its
     // absence) becomes bare `.!raiv`.
@@ -59,9 +77,15 @@ struct Compiler<'r> {
     unit_imports: Vec<String>,
     /// Custom unit names from the imports, built lazily.
     custom_units: Option<std::collections::BTreeSet<String>>,
+    /// Alias → primary-name map from the imports, built lazily.
+    custom_aliases: Option<std::collections::BTreeMap<String, String>>,
     /// `.!registry` Layer 1 overrides (prefix → base).
     registries: Vec<(String, String)>,
     out: Vec<String>,
+    /// Scoped `.!schema:/ns ID` declarations collected from block
+    /// annotations (D-10) — the discriminants, inserted into the
+    /// header at finish.
+    scoped_schemas: Vec<String>,
     pending_anno: Option<Annotation>,
     pending_prov: Option<String>,
     scalar_vars: HashMap<String, String>,
@@ -406,8 +430,10 @@ impl<'r> Compiler<'r> {
             imports: Vec::new(),
             unit_imports: Vec::new(),
             custom_units: None,
+            custom_aliases: None,
             registries: Vec::new(),
             out: Vec::new(),
+            scoped_schemas: Vec::new(),
             pending_anno: None,
             pending_prov: None,
             scalar_vars: HashMap::new(),
@@ -523,7 +549,7 @@ impl<'r> Compiler<'r> {
             if self.pending_anno.is_some() {
                 return Err(PipelineError::App(AppError::MetadataWithoutTarget));
             }
-            let a = parse_annotation(s)
+            let mut a = parse_annotation(s)
                 .ok_or_else(|| PipelineError::Other(format!("bad annotation: {s}")))?;
             // Inline provenance (`!type?prov`) occupies the provenance
             // slot: a standalone `?` line pending alongside it is a
@@ -534,13 +560,25 @@ impl<'r> Compiler<'r> {
             // A unit is exclusive with a union (grammar; same rule as
             // the schema compiler): the active variant may be `null`,
             // which a unit cannot qualify.
-            if a.unit.is_some() && !a.union.is_empty() {
-                return Err(PipelineError::Other(format!(
-                    "unit annotation on a union type: {s}"
-                )));
+            // Units ride alternatives (D-11): membership-check the
+            // head's and every alternative's unit, and rewrite
+            // `.faiv` alias spellings to their primary names —
+            // canonical lines never carry an alias. The
+            // active-variant resolution then stamps the matched
+            // alternative's own unit.
+            if let Some(u) = a.unit.clone() {
+                self.check_unit(&u)?;
+                if let Some(d) = self.dealias_unit(&u)? {
+                    a.unit = Some(d);
+                }
             }
-            if let Some(u) = &a.unit {
-                self.check_unit(u)?;
+            for i in 0..a.union.len() {
+                if let Some(u) = a.union[i].unit.clone() {
+                    self.check_unit(&u)?;
+                    if let Some(d) = self.dealias_unit(&u)? {
+                        a.union[i].unit = Some(d);
+                    }
+                }
             }
             self.pending_anno = Some(a);
         } else if let Some(p) = s.strip_prefix('?') {
@@ -648,19 +686,32 @@ impl<'r> Compiler<'r> {
     }
 
     fn ns_open(&mut self, inner: &str) -> Result<(), PipelineError> {
-        // A namespace block may carry a `schema:` annotation for
-        // scoped sub-schema (DFA) composition (SPEC.md § Namespace-
-        // Scoped Schemas). That is a Level-4-adjacent feature this
-        // implementation does not compose — reject loudly rather than
-        // silently drop the annotation and mis-validate.
-        if inner.split([' ', '\t']).any(|t| t.starts_with("schema:")) {
-            return Err(PipelineError::Other(
-                "namespace-block schema: annotations (DFA composition) are not supported".into(),
-            ));
-        }
-        let head = crate::table::tokens(inner).first().copied().unwrap_or("");
+        // A `schema:` annotation on a namespace block selects the
+        // member that validates the block (SPEC.md § Namespace-Scoped
+        // Schemas, D-10). The Compiler's part is mechanical and
+        // schema-free: emit the selection as the scoped `.!schema`
+        // declaration — the block's discriminant in canonical form
+        // (§ Canonical Form of namespace blocks) — and flatten the
+        // block as usual. A data block names exactly ONE schema; the
+        // pipe-separated set belongs to the parent `.saiv`.
+        let toks = crate::table::tokens(inner);
+        let head = toks.first().copied().unwrap_or("");
         let mut steps = self.prefix_steps();
         steps.extend(path_steps(head)?);
+        if let Some(sel) = toks.iter().find_map(|t| t.strip_prefix("schema:")) {
+            if sel.is_empty() || sel.contains('|') || toks.len() != 2 {
+                return Err(PipelineError::App(AppError::SchemaDelegation));
+            }
+            let mut np = String::new();
+            for s in &steps {
+                np.push('/');
+                np.push_str(s);
+            }
+            let decl = format!(".!schema:{np} {sel}");
+            if !self.scoped_schemas.contains(&decl) {
+                self.scoped_schemas.push(decl);
+            }
+        }
         self.blocks.push(Block::Ns { steps });
         Ok(())
     }
@@ -1080,14 +1131,20 @@ impl<'r> Compiler<'r> {
         a: &Annotation,
         value: &str,
     ) -> Result<Annotation, PipelineError> {
-        let alts = std::iter::once((a.type_name.as_str(), &a.constraints))
-            .chain(a.union.iter().map(|alt| (alt.name.as_str(), &alt.constraints)));
-        for (name, narrowing) in alts {
+        let alts = std::iter::once((a.type_name.as_str(), &a.constraints, a.unit.as_ref()))
+            .chain(
+                a.union
+                    .iter()
+                    .map(|alt| (alt.name.as_str(), &alt.constraints, alt.unit.as_ref())),
+            );
+        for (name, narrowing, unit) in alts {
             if self.variant_accepts(name, narrowing, value)? {
                 return Ok(Annotation {
                     type_name: name.to_string(),
                     constraints: narrowing.clone(),
-                    unit: a.unit.clone(),
+                    // The matched alternative's own unit rides the
+                    // active variant (D-11) — never another's.
+                    unit: unit.cloned(),
                     provenance: a.provenance.clone(),
                     ..Annotation::default()
                 });
@@ -1105,8 +1162,10 @@ impl<'r> Compiler<'r> {
         narrowing: &[Constraint],
         value: &str,
     ) -> Result<bool, PipelineError> {
+        // Value acceptance is unit-independent (the unit is identity,
+        // not a value constraint), so the alternative renders unitless.
         let rendered =
-            crate::schema::render_union_alt(name, narrowing, self.resolver, &self.registries)?;
+            crate::schema::render_union_alt(name, narrowing, None, self.resolver, &self.registries)?;
         let inner = rendered
             .strip_prefix(name)
             .and_then(|s| s.strip_prefix('('))
@@ -1133,6 +1192,26 @@ impl<'r> Compiler<'r> {
     fn clear_pending(&mut self) {
         self.pending_anno = None;
         self.pending_prov = None;
+    }
+
+    /// Rewrite `.faiv` alias factor names in a unit expression to
+    /// their primary targets; `None` when nothing changed.
+    fn dealias_unit(&mut self, u: &str) -> Result<Option<String>, PipelineError> {
+        if self.unit_imports.is_empty() {
+            return Ok(None);
+        }
+        if self.custom_aliases.is_none() {
+            let mut map = std::collections::BTreeMap::new();
+            for lib in &self.unit_imports {
+                map.extend(self.resolver.unit_aliases(lib, &self.registries)?);
+            }
+            self.custom_aliases = Some(map);
+        }
+        let map = self.custom_aliases.as_ref().unwrap();
+        if map.is_empty() {
+            return Ok(None);
+        }
+        Ok(unit::dealias(u, map))
     }
 
     /// Unit-name membership: built-in, currency, or defined by an
@@ -1162,7 +1241,10 @@ impl<'r> Compiler<'r> {
 fn render_prefix_for(a: &Annotation, prov: Option<&str>) -> String {
     let mut s = String::from("!");
     s.push_str(if a.type_name.is_empty() {
-        "str"
+        // The elided-type unit annotation stays elided in `.raiv`
+        // (D-15) — the schema-aware Denormalizer resolves it; a
+        // fully unannotated line is the identity str.
+        if a.unit.is_some() { "" } else { "str" }
     } else {
         &a.type_name
     });
@@ -1308,7 +1390,15 @@ mod tests {
     fn lone_dollar_and_ns_schema_are_loud() {
         // A trailing `$` forms no reference — must be written `$$`.
         assert!(crate::compile(b".!kaiv 1\nx=a$\n").is_err());
-        assert!(crate::compile(b".!kaiv 1\n(/p schema:acme/x)\na=1\n()\n").is_err());
+        // A block `schema:` annotation is the member selection
+        // (D-10): the Compiler emits it as the scoped declaration —
+        // the discriminant — in the header run.
+        let r = crate::compile(b".!kaiv 1\n(/p schema:acme/x)\na=1\n()\n").unwrap();
+        assert!(r.starts_with(".!raiv\n.!schema:/p acme/x\n"), "{r}");
+        assert!(r.contains("!str'/p::a=1\n"), "{r}");
+        // A data block names exactly ONE schema; a set is the parent
+        // `.saiv`'s surface.
+        assert!(crate::compile(b".!kaiv 1\n(/p schema:a/x|a/y)\na=1\n()\n").is_err());
     }
 
     fn app_err(input: &str) -> Option<AppError> {
@@ -1431,8 +1521,10 @@ mod tests {
             app_err(".!kaiv 1\n!null|int\nx=abc\n"),
             Some(AppError::TypeMismatch)
         );
-        // A unit is exclusive with a union on data lines too.
-        assert!(crate::compile(b".!kaiv 1\n!int:s|null\nt=1\n").is_err());
+        // Units ride alternatives on data lines too (D-11): the
+        // active variant carries its own unit.
+        let r = crate::compile(b".!kaiv 1\n!int:s|null\nt=1\n").unwrap();
+        assert!(r.contains("!int:s'::t=1\n"), "{r}");
     }
 
     #[test]

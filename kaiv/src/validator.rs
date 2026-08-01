@@ -17,6 +17,14 @@ pub struct CompiledSchema {
     pub fields: Vec<SchemaField>,
     /// Level 2 collection constraint lines, checked by Pass 2.
     pub collections: Vec<Collection>,
+    /// Delegated namespaces (SPEC.md § Delegated Namespaces in the
+    /// Compiled Schema, D-10): namespace path and the member set.
+    pub delegations: Vec<(String, Vec<String>)>,
+    /// Per-delegated-namespace header overrides: inside the prefix,
+    /// the selected member's `strict` and `.!provenance` govern
+    /// (SPEC.md § Namespace-Scoped Schemas) — inheritance merges are
+    /// NOT here; the extending header governs those.
+    pub scoped_headers: Vec<(String, bool, Option<ProvenanceLevel>)>,
 }
 
 /// The three `.!provenance` requirement levels (SPEC.md § Requiring
@@ -61,6 +69,7 @@ fn parse_csaiv_inner(text: &str) -> Result<CompiledSchema, PipelineError> {
     let mut provenance = None;
     let mut fields = Vec::new();
     let mut collections = Vec::new();
+    let mut delegations = Vec::new();
     for raw in text.lines() {
         let s = raw.trim_start_matches([' ', '\t']);
         if s.is_empty() || s.starts_with('#') || s.starts_with("//") {
@@ -89,6 +98,17 @@ fn parse_csaiv_inner(text: &str) -> Result<CompiledSchema, PipelineError> {
         let Some(tick) = find_tick(s) else {
             if let Some((array, clauses)) = s.split_once([' ', '\t']) {
                 if array.starts_with('/') {
+                    // Delegation line (D-10): the namespace's entire
+                    // compiled presence — a one-of-N member set.
+                    if let Some(set) = clauses
+                        .trim_matches([' ', '\t'])
+                        .strip_prefix("[schema::")
+                        .and_then(|r| r.strip_suffix(']'))
+                    {
+                        delegations
+                            .push((array.to_string(), set.split('|').map(str::to_string).collect()));
+                        continue;
+                    }
                     if let Some(header) =
                         crate::table::parse_compiled(clauses.trim_matches([' ', '\t']))
                     {
@@ -123,6 +143,8 @@ fn parse_csaiv_inner(text: &str) -> Result<CompiledSchema, PipelineError> {
         });
     }
     Ok(CompiledSchema {
+        delegations,
+        scoped_headers: Vec::new(),
         strict,
         provenance,
         fields,
@@ -257,6 +279,7 @@ pub fn schema_for_daiv(
     }
     let mut out: Vec<String> = Vec::new();
     let mut merged: HashMap<String, usize> = HashMap::new();
+    let mut scoped_hdrs: Vec<(String, bool, Option<ProvenanceLevel>)> = Vec::new();
     for (qualifier, reference) in &refs {
         if reference.starts_with("http://") || reference.starts_with("https://") {
             return Err(PipelineError::App(AppError::SchemaResolution));
@@ -264,6 +287,28 @@ pub fn schema_for_daiv(
         let bytes = resolver.csaiv_bytes(reference, &layer1)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| PipelineError::Other(format!("{reference}.csaiv is not UTF-8")))?;
+        // Capture a qualified member's own header modifiers; after
+        // parsing, only delegated prefixes keep them (an inheritance
+        // merge stays governed by the extending header — SPEC.md
+        // § Compiled merge).
+        if let Some(ns) = qualifier.as_deref() {
+            let mut mstrict = false;
+            let mut mprov = None;
+            for l in text.lines() {
+                let t = l.trim_start_matches([' ', '\t']);
+                if t.starts_with(".!csaiv") {
+                    mstrict = t.split_ascii_whitespace().any(|k| k == "strict");
+                } else if let Some(lvl) = t.strip_prefix(".!provenance:") {
+                    mprov = match lvl.trim_matches([' ', '\t']) {
+                        "required" => Some(ProvenanceLevel::Required),
+                        "source" => Some(ProvenanceLevel::Source),
+                        "none" => Some(ProvenanceLevel::None),
+                        _ => None,
+                    };
+                }
+            }
+            scoped_hdrs.push((ns.to_string(), mstrict, mprov));
+        }
         let element_wise = qualifier.as_deref().is_some_and(|q| {
             crate::lexer::split_slash(q)
                 .last()
@@ -291,7 +336,27 @@ pub fn schema_for_daiv(
     }
     let mut text = out.join("\n");
     text.push('\n');
-    parse_csaiv_inner(&text).map(Some)
+    let mut schema = parse_csaiv_inner(&text)?;
+    schema.scoped_headers = scoped_hdrs
+        .into_iter()
+        .filter(|(ns, ..)| schema.delegations.iter().any(|(dns, _)| dns == ns))
+        .collect();
+    // Delegation checks (SPEC.md § Delegated Namespaces in the
+    // Compiled Schema, D-10): a delegated namespace's document must
+    // carry exactly one scoped declaration, naming a member of the
+    // set. The scoped merge above then validates the block's lines
+    // against the selected member's fields under the prefix.
+    for (ns, members) in &schema.delegations {
+        let sel: Vec<&String> = refs
+            .iter()
+            .filter_map(|(q, r)| (q.as_deref() == Some(ns.as_str())).then_some(r))
+            .collect();
+        match sel.as_slice() {
+            [one] if members.contains(*one) => {}
+            _ => return Err(PipelineError::App(AppError::DelegationSchema)),
+        }
+    }
+    Ok(Some(schema))
 }
 
 pub(crate) struct DataLine {
@@ -372,6 +437,29 @@ fn field_ctx(error: AppError, f: &SchemaField, d: &DataLine) -> AppErrorAt {
     )
 }
 
+/// The innermost delegated-namespace header override covering a
+/// namepath, if any (D-10: the member's contract governs inside).
+fn scoped_header<'s>(
+    schema: &'s CompiledSchema,
+    namepath: &str,
+) -> Option<&'s (String, bool, Option<ProvenanceLevel>)> {
+    schema
+        .scoped_headers
+        .iter()
+        .filter(|(ns, ..)| {
+            namepath
+                .strip_prefix(ns.as_str())
+                .is_some_and(|r| r.is_empty() || r.starts_with("::") || r.starts_with('/'))
+        })
+        .max_by_key(|(ns, ..)| ns.len())
+}
+
+/// Effective strictness at a namepath: the covering delegated
+/// member's modifier, else the document schema's.
+fn scoped_strict(schema: &CompiledSchema, namepath: &str) -> bool {
+    scoped_header(schema, namepath).map_or(schema.strict, |h| h.1)
+}
+
 pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
     // Canonical-kind gate: the Validator consumes `.daiv` only
     // (SPEC.md § Format Declaration).
@@ -398,8 +486,16 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
     // array element runs inside validate_ns_array without revisiting
     // them, so an in-loop check would miss every element line past the
     // first.
-    if let Some(level) = schema.provenance {
-        for d in &data {
+    for d in &data {
+        // Inside a delegated namespace the member's `.!provenance`
+        // level fully replaces the parent's — including replacing a
+        // parent requirement with none (SPEC.md § Namespace-Scoped
+        // Schemas).
+        let level = match scoped_header(schema, &d.namepath) {
+            Some(h) => h.2,
+            None => schema.provenance,
+        };
+        if let Some(level) = level {
             check_provenance(level, d.provenance.as_deref()).map_err(|e| {
                 let want = match level {
                     ProvenanceLevel::Required => "requires source and timestamp on every line",
@@ -430,7 +526,7 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
         // strict-vs-relaxed), and the defined fields that follow
         // still have to find their schema lines.
         if !schema.fields.iter().any(|f| line_matches(f, &d.namepath)) {
-            if schema.strict {
+            if scoped_strict(schema, &d.namepath) {
                 return Err(at(
                     AppError::UndefinedFieldStrictSchema,
                     d.line,
@@ -459,7 +555,7 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
             si += 1;
         }
         if si == schema.fields.len() {
-            if schema.strict {
+            if scoped_strict(schema, &d.namepath) {
                 return Err(at(
                     AppError::UndefinedFieldStrictSchema,
                     d.line,
@@ -480,7 +576,13 @@ pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
             {
                 gend += 1;
             }
-            di = validate_ns_array(&schema.fields[si..gend], &arr, &data, di, schema.strict)?;
+            di = validate_ns_array(
+                &schema.fields[si..gend],
+                &arr,
+                &data,
+                di,
+                scoped_strict(schema, &arr),
+            )?;
             si = gend;
             continue;
         }
@@ -942,21 +1044,35 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
         .unwrap_or("..lex");
     collation_tag(span)?;
 
+    // The elided-type prefix (`!:km`) is `.raiv`-only (D-15): the
+    // Denormalizer resolves it, so meeting one at validation — a
+    // hand-made `.daiv` — is a mismatch.
+    if d.type_name.is_empty() {
+        return Err(AppError::TypeMismatch);
+    }
     // Units byte-compare, both directions (SPEC.md § Validation:
     // units do not convert). The data line's unit must canonicalize
     // to exactly the field's — including the case where the field
     // carries no unit (a unit-bearing data line is then a mismatch)
     // and where the data line's unit is not a known unit at all.
-    let field_unit = f.items.iter().find_map(|i| match i {
-        Item::Anno(a) => a.unit.as_deref().and_then(crate::unit::canonicalize),
-        _ => None,
-    });
+    // For a union head the unit rides the matched alternative and
+    // is part of the discriminant below (D-11), so the flat check
+    // is skipped there.
     let data_unit = match &d.unit {
         None => None,
         Some(u) => Some(crate::unit::canonicalize(u).ok_or(AppError::TypeMismatch)?),
     };
-    if field_unit != data_unit {
-        return Err(AppError::TypeMismatch);
+    let head_anno = f.items.iter().find_map(|i| match i {
+        Item::Anno(a) => Some(a),
+        _ => None,
+    });
+    if head_anno.is_none_or(|a| a.union.is_empty()) {
+        let field_unit = head_anno
+            .and_then(|a| a.unit.as_deref())
+            .and_then(crate::unit::canonicalize);
+        if field_unit != data_unit {
+            return Err(AppError::TypeMismatch);
+        }
     }
 
     for item in &f.items {
@@ -965,7 +1081,16 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
                 // The data line's type selects the alternative; the
                 // matched alternative's own constraint group (and its
                 // span) governs the value (SPEC.md § Tagged unions).
-                let matched: Option<&[Constraint]> = if a.type_name == d.type_name {
+                // In a union, the discriminant match includes the
+                // unit (D-11): name plus byte-identical canonical
+                // unit, and an alternative without a unit matches
+                // only a unit-less annotation.
+                let unit_ok = |u: &Option<String>| {
+                    u.as_deref().and_then(crate::unit::canonicalize) == data_unit
+                };
+                let matched: Option<&[Constraint]> = if a.type_name == d.type_name
+                    && (a.union.is_empty() || unit_ok(&a.unit))
+                {
                     Some(&a.constraints)
                 } else if a.type_name == "text" && d.type_name == "str" {
                     // str→text coercion (SPEC.md § The text Type): a
@@ -1008,7 +1133,7 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
                 } else {
                     a.union
                         .iter()
-                        .find(|alt| alt.name == d.type_name)
+                        .find(|alt| alt.name == d.type_name && unit_ok(&alt.unit))
                         .map(|alt| alt.constraints.as_slice())
                 };
                 let Some(cs) = matched else {
@@ -1445,6 +1570,75 @@ mod tests {
         "!str'::host=\n",
         "/^-?[0-9]+$/ ..num [1,65535]'::port=8080\n",
     );
+
+    #[test]
+    fn delegated_member_header_governs_inside() {
+        // D-10: inside a delegated namespace the member's strict and
+        // .!provenance govern; the parent's header governs outside.
+        let r = crate::Resolver::offline();
+        r.preload(
+            "x509/algo",
+            "csaiv",
+            b".!csaiv x509/algo\n/^/'::algorithm=\n/parameters [schema::crypto/rsa]\n".to_vec(),
+        );
+        r.preload(
+            "crypto/rsa",
+            "csaiv",
+            b".!csaiv crypto/rsa strict\n!str'::modulus=\n".to_vec(),
+        );
+        let hdr = ".!daiv\n.!schema:x509/algo\n.!schema:/parameters crypto/rsa\n";
+        let ok = format!(
+            "{hdr}!str'::algorithm=rsa\n!str'::stray=x\n!str'/parameters::modulus=m\n"
+        );
+        let s = schema_for_daiv(&ok, &r).unwrap().unwrap();
+        assert_eq!(s.scoped_headers.len(), 1);
+        // Root stray tolerated (parent relaxed) …
+        validate(&ok, &s).unwrap();
+        // … but a stray inside the delegated namespace hits the
+        // member's strict modifier.
+        let bad = format!(
+            "{hdr}!str'::algorithm=rsa\n!str'/parameters::modulus=m\n!str'/parameters::extra=y\n"
+        );
+        assert!(matches!(
+            validate(&bad, &s).unwrap_err().error,
+            AppError::UndefinedFieldStrictSchema
+        ));
+    }
+
+    #[test]
+    fn delegated_member_provenance_governs_inside() {
+        let r = crate::Resolver::offline();
+        r.preload(
+            "x509/algo",
+            "csaiv",
+            b".!csaiv x509/algo\n/^/'::algorithm=\n/parameters [schema::crypto/rsa]\n".to_vec(),
+        );
+        r.preload(
+            "crypto/rsa",
+            "csaiv",
+            b".!csaiv crypto/rsa\n.!provenance:source\n!str'::modulus=\n".to_vec(),
+        );
+        let hdr = ".!daiv\n.!schema:x509/algo\n.!schema:/parameters crypto/rsa\n";
+        let s = schema_for_daiv(
+            &format!("{hdr}!str'::algorithm=rsa\n!str'/parameters::modulus=m\n"),
+            &r,
+        )
+        .unwrap()
+        .unwrap();
+        // Root line without provenance passes (parent imposes none);
+        // the member requires a source inside the namespace.
+        let ok = format!(
+            "{hdr}!str'::algorithm=rsa\n!str?lab'/parameters::modulus=m\n"
+        );
+        validate(&ok, &s).unwrap();
+        let bad = format!(
+            "{hdr}!str'::algorithm=rsa\n!str'/parameters::modulus=m\n"
+        );
+        assert!(matches!(
+            validate(&bad, &s).unwrap_err().error,
+            AppError::ProvenanceSchema
+        ));
+    }
 
     #[test]
     fn schema_for_daiv_none_without_declaration() {

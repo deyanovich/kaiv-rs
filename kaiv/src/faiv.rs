@@ -198,9 +198,12 @@ pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
         ));
     }
     if library.is_empty() {
-        return Err(PipelineError::Other(
-            "missing .!faiv declaration in .faiv".into(),
-        ));
+        // The REQUIRED header gate is FORMAT_KIND (SPEC.md
+        // § Format Declaration, § Errors).
+        return Err(PipelineError::Lex(crate::error::LexErrorAt {
+            error: crate::error::LexError::FormatKind,
+            line: 1,
+        }));
     }
     Ok(UnitLib { library, units })
 }

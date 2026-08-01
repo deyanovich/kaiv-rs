@@ -118,6 +118,26 @@ fn valid_vectors() {
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let input = fs::read(dir.join("input.kaiv")).unwrap();
+        // An error vector (expected.error in place of expected.daiv):
+        // the build pipeline must fail with the named error — the
+        // denorm-error surface (UnitConversionError,
+        // DelegationSchemaError, …).
+        let epath = dir.join("expected.error");
+        if epath.is_file() {
+            let want = fs::read_to_string(&epath).unwrap().trim().to_string();
+            let resolver = resolver_for(&dir);
+            let r = kaiv::compile_with(&input, &resolver)
+                .and_then(|raiv| kaiv::denormalize_with(&raiv, &resolver));
+            match r {
+                Ok(_) => failures.push(format!("{name}: pipeline OK, want {want}")),
+                Err(e) => match pipeline_error_name(&e) {
+                    Some(got) if got == want => {}
+                    Some(got) => failures.push(format!("{name}: got {got}, want {want}")),
+                    None => failures.push(format!("{name}: unnamed error {e}, want {want}")),
+                },
+            }
+            continue;
+        }
         let expected_daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
         // A missing expected.raiv means "same as .daiv except the
         // first line reads .!raiv" (per the README); any OTHER read
@@ -194,17 +214,21 @@ fn schema_vectors() {
             }
         };
         let vdir = dir.join("validate");
-        let mut cases: Vec<PathBuf> = fs::read_dir(&vdir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "daiv"))
-            .collect();
+        // Compile-only vectors (no validate/ dir) are legal — e.g.
+        // the delegation surface before its sub-scan lands (D-10).
+        let mut cases: Vec<PathBuf> = match fs::read_dir(&vdir) {
+            Err(_) => Vec::new(),
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "daiv"))
+                .collect(),
+        };
         cases.sort();
         // Every `*.expected` must have a paired `*.daiv`, and the dir
         // must hold at least one case — otherwise a mis-named or missing
         // file would silently pass the vector.
-        for entry in fs::read_dir(&vdir).unwrap().filter_map(|e| e.ok()) {
+        for entry in fs::read_dir(&vdir).into_iter().flatten().filter_map(|e| e.ok()) {
             let p = entry.path();
             if p.extension().is_some_and(|x| x == "expected") && !p.with_extension("daiv").is_file() {
                 failures.push(format!(
@@ -213,7 +237,10 @@ fn schema_vectors() {
                 ));
             }
         }
-        assert!(!cases.is_empty(), "{name}: validate/ has no .daiv cases");
+        assert!(
+            !cases.is_empty() || !dir.join("validate").is_dir(),
+            "{name}: validate/ has no .daiv cases"
+        );
         for case in cases {
             let cname = case.file_stem().unwrap().to_string_lossy().to_string();
             let daiv = fs::read_to_string(&case).unwrap();
@@ -335,6 +362,9 @@ fn fmt_preserves_compilation() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        if dir.join("expected.error").is_file() {
+            continue; // error vectors carry no golden .raiv
+        }
         let input = fs::read_to_string(dir.join("input.kaiv")).unwrap();
         let expected_raiv = {
             let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
@@ -385,6 +415,9 @@ fn lift_round_trips() {
             continue;
         }
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        if dir.join("expected.error").is_file() {
+            continue; // error vectors carry no golden .daiv
+        }
         let daiv = fs::read_to_string(dir.join("expected.daiv")).unwrap();
         let resolver = resolver_for(&dir);
         let lifted = match kaiv::lift(&daiv) {

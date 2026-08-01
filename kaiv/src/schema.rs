@@ -100,6 +100,12 @@ fn compile_schema_chain(
     chain: &mut Vec<String>,
 ) -> Result<String, PipelineError> {
     let lines = lex(input, FileKind::Schema).map_err(PipelineError::Lex)?;
+    // A `.saiv` header is REQUIRED: the FORMAT_KIND gate covers
+    // the REQUIRED-header authored kinds exactly as it covers the
+    // canonical kinds (SPEC.md § Format Declaration, § Errors).
+    if let Ok(text) = std::str::from_utf8(input) {
+        crate::lexer::expect_kind(text, "saiv").map_err(PipelineError::Lex)?;
+    }
     let mut out: Vec<String> = Vec::new();
     let mut pending: Option<Annotation> = None;
     let mut ns_prefix: Vec<String> = Vec::new();
@@ -120,6 +126,9 @@ fn compile_schema_chain(
         map_done: bool,
         /// The block already holds ordinary member declarations.
         content_seen: bool,
+        /// A delegated namespace (D-10): the block declares the
+        /// member set and admits no inline content at all.
+        delegated: bool,
     }
     let mut ns_blocks: Vec<NsBlock> = Vec::new();
     let mut arr_prefix: Option<String> = None;
@@ -205,6 +214,9 @@ fn compile_schema_chain(
                 }
             }
             LineKind::Meta(s) => {
+                if ns_blocks.last().is_some_and(|b| b.delegated) {
+                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                }
                 if s.starts_with('!') {
                     let a = parse_annotation(s)
                         .ok_or_else(|| PipelineError::Other(format!("bad annotation: {s}")))?;
@@ -260,10 +272,11 @@ fn compile_schema_chain(
                     // compiled contract relative to the authored one.
                     let items = parse_constraint_items(s)
                         .ok_or_else(|| PipelineError::Other(format!("bad constraint line: {s}")))?;
-                    let mut a = Annotation {
-                        type_name: "str".into(),
-                        ..Annotation::default()
-                    };
+                    // Anonymous refinement stays headless: an empty
+                    // type_name is the not-authored marker — retention
+                    // is authorial intent (D-12), and only an authored
+                    // `!str` becomes the nominal identity declaration.
+                    let mut a = Annotation::default();
                     for it in items {
                         match it {
                             Item::Constraint(c) => a.constraints.push(c),
@@ -278,19 +291,22 @@ fn compile_schema_chain(
                 }
             }
             LineKind::NsOpen(inner) => {
-                // A `schema:` composition annotation on a namespace
-                // block is DFA composition — unsupported; reject rather
-                // than silently drop (matches the data compiler and the
-                // module's no-silent-drop policy).
-                if inner.split([' ', '\t']).any(|t| t.starts_with("schema:")) {
-                    return Err(PipelineError::Other(
-                        "namespace-block schema: annotations (DFA composition) are not supported"
-                            .into(),
-                    ));
-                }
                 if ns_blocks.last().is_some_and(|b| b.map_done) {
                     return Err(map_block_member_error(line.no));
                 }
+                if ns_blocks.last().is_some_and(|b| b.delegated) {
+                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                }
+                // A `schema:` clause declares a discriminated schema
+                // set (SPEC.md § Namespace-Scoped Schemas, D-10): the
+                // block delegates the namespace to one of N member
+                // schemas, declares no inline fields, and compiles to
+                // the delegation line — the namespace's entire
+                // compiled presence.
+                let deleg: Option<Vec<String>> = inner
+                    .split([' ', '\t'])
+                    .find_map(|t| t.strip_prefix("schema:"))
+                    .map(|set| set.split('|').map(str::to_string).collect());
                 // Quote-aware: a quoted segment may contain whitespace
                 // (token split) or `/` (step split).
                 let toks = crate::table::tokens(inner);
@@ -304,7 +320,26 @@ fn compile_schema_chain(
                 // Header bounds mark a map block (the lexer admits
                 // only `min=`/`max=` digit tokens here, like table
                 // headers; `schema:` was rejected above).
-                let bounds = if toks.len() > 1 {
+                if let Some(members) = &deleg {
+                    // The path plus exactly one schema: token; an
+                    // empty or duplicate member is rejected.
+                    if toks.len() != 2
+                        || members.iter().any(|m| m.is_empty())
+                        || {
+                            let mut seen = std::collections::BTreeSet::new();
+                            !members.iter().all(|m| seen.insert(m.as_str()))
+                        }
+                    {
+                        return Err(PipelineError::App(AppError::SchemaDelegation));
+                    }
+                    let mut np = String::new();
+                    for s0 in ns_prefix.iter().chain(segs.iter()) {
+                        np.push('/');
+                        np.push_str(s0);
+                    }
+                    out.push(format!("{np} [schema::{}]", members.join("|")));
+                }
+                let bounds = if deleg.is_none() && toks.len() > 1 {
                     let h = crate::table::parse_header(&toks[1..])
                         .filter(|h| h.groups.is_empty())
                         .ok_or_else(|| {
@@ -323,6 +358,7 @@ fn compile_schema_chain(
                     has_bounds: bounds.is_some(),
                     map_done: false,
                     content_seen: false,
+                    delegated: deleg.is_some(),
                 });
                 ns_prefix.extend(segs);
             }
@@ -343,6 +379,9 @@ fn compile_schema_chain(
             LineKind::SectionOpen(inner) => {
                 if ns_blocks.last().is_some_and(|b| b.map_done) {
                     return Err(map_block_member_error(line.no));
+                }
+                if ns_blocks.last().is_some_and(|b| b.delegated) {
+                    return Err(PipelineError::App(AppError::SchemaDelegation));
                 }
                 if let Some(b) = ns_blocks.last_mut() {
                     b.content_seen = true;
@@ -383,6 +422,12 @@ fn compile_schema_chain(
                 arr_prefix = None;
             }
             LineKind::Content { left, value } => {
+                // A delegated namespace declares no inline fields
+                // (D-10); its compiled presence is the delegation
+                // line alone.
+                if ns_blocks.last().is_some_and(|b| b.delegated) {
+                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                }
                 // A lowered map block admits nothing after its key
                 // line; in particular a literal key line (a required
                 // named entry) is outside the D-2 surface.
@@ -846,23 +891,17 @@ fn lower_with_defaults(
     layer1: &[(String, String)],
 ) -> Result<(Vec<String>, Vec<String>), PipelineError> {
     if !a.union.is_empty() {
-        // A unit annotation is exclusive with a union type in the
-        // grammar; the union lowering has no place to carry it, so
-        // reject rather than silently drop it.
-        if a.unit.is_some() {
-            return Err(PipelineError::Other(format!(
-                "unit annotation on a union type: !{}",
-                a.type_name
-            )));
-        }
         // Union: the type names survive as the discriminant, and each
         // alternative carries its lowered definition + narrowing as a
-        // whitespace-free parenthesized group, so the union stays one
-        // item token (SPEC.md § Tagged unions).
+        // whitespace-free parenthesized group — and its unit, glued
+        // to its name (D-11): the unit rides the alternative, never
+        // the union, so `!null|float:km` compiles to
+        // `!null(/^$/)|float:km(…)`.
         let mut u = String::from("!");
         u.push_str(&render_union_alt(
             &a.type_name,
             &a.constraints,
+            a.unit.as_deref(),
             resolver,
             layer1,
         )?);
@@ -871,6 +910,7 @@ fn lower_with_defaults(
             u.push_str(&render_union_alt(
                 &alt.name,
                 &alt.constraints,
+                alt.unit.as_deref(),
                 resolver,
                 layer1,
             )?);
@@ -901,28 +941,27 @@ fn lower_with_defaults(
     if let Some(u) = &col.unit {
         items.insert(0, format!("!{}:{u}", a.type_name));
     }
-    // Head-type retention: the authored head type name survives
-    // lowering as the leading item — `!text` (export semantics, as
-    // before) and now every other non-`str` head, so the compiled
-    // schema states each field's type by name: `.daiv` self-
-    // description, and the source for the Denormalizer's type lift
-    // (SPEC.md § The Schema Compiler). A unit-carrying head already
-    // retained its `!type:unit` token above; the implicit/explicit
-    // `str` head stays elided — a field line with no type item has
-    // head type `str`.
-    else if !a.type_name.is_empty() && a.type_name != "str" && a.type_name != "map" {
+    // Head-type retention (SPEC.md § The Schema Compiler): the
+    // authored head type name survives lowering as the leading item —
+    // `!text` (export semantics), every other non-`str` head, and —
+    // retention by intent (D-12) — an *authored* `!str`, the identity
+    // declaration, which the Validator checks nominally. A field with
+    // no authored type (unannotated, or an anonymous refinement;
+    // `type_name` empty) carries no type item at all.
+    else if !a.type_name.is_empty() && a.type_name != "map" {
         items.insert(0, format!("!{}", a.type_name));
     } else if items.is_empty() {
-        items.push("!str".into());
+        // Lex-saver for a headless, items-free field: the vacuous
+        // pattern — a constraint item, not a head (D-12).
+        items.push("/^/".into());
     }
     // A field line may not begin with `#` (rule 2 → comment) or `//`
     // (an empty pattern `//`, or empty `re` body, renders leading
-    // `//`, which parse_csaiv also skips as a comment). In either case
-    // the retained `!str` type item is emitted first so the compiled
-    // line re-lexes as a field rather than being swallowed (SPEC.md
-    // § The Schema Compiler).
+    // `//`, which parse_csaiv also skips as a comment). A headless
+    // line gets the vacuous-pattern lex-saver first (D-12); an
+    // authored head was already inserted at position 0 above.
     if items[0].starts_with('#') || items[0].starts_with("//") {
-        items.insert(0, "!str".into());
+        items.insert(0, "/^/".into());
     }
     Ok((items, col.defaults))
 }
@@ -1006,6 +1045,7 @@ pub(crate) fn field_export_kind(items: &[Item]) -> ExportKind {
 pub(crate) fn render_union_alt(
     name: &str,
     narrowing: &[Constraint],
+    unit: Option<&str>,
     resolver: &Resolver,
     layer1: &[(String, String)],
 ) -> Result<String, PipelineError> {
@@ -1017,11 +1057,29 @@ pub(crate) fn render_union_alt(
     let mut b = Buckets::default();
     let mut col = Collected::default();
     bucket_annotation(&pseudo, resolver, layer1, &mut b, &mut col, 0)?;
+    // A unit rides only a numeric (`..num`-derived) alternative
+    // (D-11), canonicalized like any other unit; the compiled form
+    // glues it to the alternative's name so the Validator can
+    // include it in the discriminant match.
+    let head = match unit {
+        Some(u) => {
+            if !b.spans.iter().any(|s| s.starts_with("..num")) {
+                return Err(PipelineError::Other(format!(
+                    "unit annotation on a non-numeric union alternative: {name}:{u}"
+                )));
+            }
+            let cu = crate::unit::canonicalize(u).ok_or_else(|| {
+                PipelineError::Other(format!("invalid unit expression: {u}"))
+            })?;
+            format!("{name}:{cu}")
+        }
+        None => name.to_string(),
+    };
     let items = b.into_items(col.b64);
     if items.is_empty() {
-        Ok(name.to_string())
+        Ok(head)
     } else {
-        Ok(format!("{name}({})", items.concat()))
+        Ok(format!("{head}({})", items.concat()))
     }
 }
 
@@ -1219,7 +1277,15 @@ mod tests {
 
     #[test]
     fn unit_on_union_type_is_rejected() {
-        assert!(compile_schema(b".!saiv a/u\n!int:s|null\ntimeout=\n").is_err());
+        // D-11: the unit rides the alternative it follows — legal on
+        // a numeric alternative, glued to its name in the compiled
+        // form; still rejected on a non-numeric one.
+        let csaiv = compile_schema(b".!saiv a/u\n!int:s|null\ntimeout=\n").unwrap();
+        assert!(csaiv.contains("!int:s(/^-?[0-9]+$/..num)|null(/^$/)'::timeout=\n"));
+        let csaiv = compile_schema(b".!saiv a/u\n!null|float:km\ndist?=\n").unwrap();
+        assert!(csaiv.contains("|float:km("));
+        assert!(compile_schema(b".!saiv a/u\n!null:km|int\nx=\n").is_err());
+        assert!(compile_schema(b".!saiv a/u\n!int|str:km\nx=\n").is_err());
     }
 
     #[test]

@@ -78,6 +78,13 @@ pub enum AppError {
     /// A `.!schema` inheritance chain among `.saiv` files revisits a
     /// schema already in the chain.
     SchemaInheritanceCycle,
+    /// A parent schema both delegates a namespace and declares
+    /// fields under it, or declares an empty/duplicate member set
+    /// (SPEC.md § Namespace-Scoped Schemas, D-10).
+    SchemaDelegation,
+    /// A document under a delegating schema carries no scoped
+    /// declaration for the namespace, or one outside the set.
+    DelegationSchema,
     /// An optional field whose resolved default is inapplicable and
     /// whose type does not admit `!null` — the Denormalizer would
     /// have nothing to materialize for an absent instance (SPEC.md
@@ -98,6 +105,10 @@ pub enum AppError {
     /// both render the same spec name.
     FormatKind,
     TypeMismatch,
+    /// An authored same-dimension unit cannot convert exactly into
+    /// the field's declared unit (SPEC.md § Authored-Unit
+    /// Conversion, D-14).
+    UnitConversion,
     ConstraintViolation,
     UniquenessViolation,
     /// A `.maiv` leaves a required target-schema field unproduced
@@ -117,6 +128,8 @@ impl AppError {
             AppError::DelimiterCollision => "DelimiterCollisionError",
             AppError::SchemaDuplicateKey => "SchemaDuplicateKeyError",
             AppError::SchemaInheritanceCycle => "SchemaInheritanceCycleError",
+            AppError::SchemaDelegation => "SchemaDelegationError",
+            AppError::DelegationSchema => "DelegationSchemaError",
             AppError::SchemaOptionalWithoutDefault => "SchemaOptionalWithoutDefaultError",
             AppError::SchemaResolution => "SchemaResolutionError",
             AppError::RegistryStrict => "RegistryStrictError",
@@ -126,6 +139,7 @@ impl AppError {
             AppError::ProvenanceSchema => "ProvenanceSchemaError",
             AppError::FormatKind => "FORMAT_KIND_ERROR",
             AppError::TypeMismatch => "TypeMismatchError",
+            AppError::UnitConversion => "UnitConversionError",
             AppError::ConstraintViolation => "ConstraintViolationError",
             AppError::UniquenessViolation => "UniquenessViolationError",
             AppError::IncompleteMapping => "IncompleteMappingError",

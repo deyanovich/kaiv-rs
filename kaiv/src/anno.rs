@@ -27,6 +27,9 @@ pub enum Constraint {
 pub struct UnionAlt {
     pub name: String,
     pub constraints: Vec<Constraint>,
+    /// The alternative's unit (D-11): a unit rides the alternative
+    /// it follows, never the union.
+    pub unit: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,6 +67,36 @@ pub fn parse_annotation(s: &str) -> Option<Annotation> {
     let cs: Vec<char> = s.chars().collect();
     let mut i = 0;
     let mut a = Annotation::default();
+
+    // The elided-type unit annotation `!:unit` (D-15): a unit and
+    // an optional provenance list, nothing else — the type is
+    // inherited from the governing head (else `float`) by the
+    // Denormalizer, and the form is `.raiv`-only in canonical text.
+    if cs.first() == Some(&':') {
+        i = 1;
+        let start = i;
+        while i < cs.len() && is_unit_char(cs[i]) {
+            i += 1;
+        }
+        if i == start {
+            return None;
+        }
+        let u: String = cs[start..i].iter().collect();
+        crate::unit::canonicalize(&u)?;
+        a.unit = Some(u);
+        if cs.get(i) == Some(&'?') {
+            i += 1;
+            let ps = i;
+            while i < cs.len() && !matches!(cs[i], ' ' | '\t' | '\'') {
+                i += 1;
+            }
+            a.provenance = Some(cs[ps..i].iter().collect());
+        }
+        if i != cs.len() {
+            return None; // no constraints, no re-literal (D-15)
+        }
+        return Some(a);
+    }
 
     // Type reference. The first segment decides: a core type name is
     // terminal (a following `/` starts a pattern constraint); anything
@@ -195,7 +228,13 @@ pub fn parse_annotation(s: &str) -> Option<Annotation> {
                 // Grammar + membership check (§ Built-in units): an
                 // expression that does not canonicalize is invalid.
                 crate::unit::canonicalize(&u)?;
-                a.unit = Some(u);
+                // The unit attaches to the alternative it follows
+                // (D-11): the last union alternative if any, else
+                // the head.
+                match a.union.last_mut() {
+                    Some(alt) => alt.unit = Some(u),
+                    None => a.unit = Some(u),
+                }
             }
             '?' => {
                 // Provenance lists contain no whitespace — and no
@@ -249,6 +288,7 @@ pub fn parse_annotation(s: &str) -> Option<Annotation> {
                 a.union.push(UnionAlt {
                     name: path,
                     constraints: Vec::new(),
+                    unit: None,
                 });
             }
             _ => return None,

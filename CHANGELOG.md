@@ -7,6 +7,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
 guidelines.
 
+[0.10.0] - 2026-07-31
+---------------------
+
+The design-review release: implements the eight rulings
+(D-10 through D-15 plus the two conformance-surface strays)
+logged against the format spec's 1.0-draft.13 review.
+
+### Added
+
+- **Schema delegation — the discriminated schema set (D-10).**
+  A `.saiv` can declare an ostensive parent block over a set of
+  member schemas (`(/ns schema:A|B)`); the compiled `.csaiv`
+  carries a `[schema::A|B]` delegation line, and the document
+  picks its member with a scoped `.!schema:/ns ID` discriminant
+  declaration (mandatory: a delegated namespace without one is
+  a `DelegationSchemaError`, as is a discriminant outside the
+  declared set). The composite validation contract merges the
+  parent and the selected member; the member's own header
+  governs inside its prefix — `strict` and the
+  `.!provenance` level apply per delegated namespace, not
+  from the parent.
+- **Per-alternative units in unions (D-11).** Each union
+  alternative carries its own unit annotation
+  (`!null|float:km`); the discriminant match honors the active
+  alternative's unit on schema and data lines alike (the old
+  blanket rejection of units on unions is gone).
+- **Authored-unit conversion, exact decimal only (D-14).** A
+  data line authored in a different unit of the same dimension
+  as the field's declared unit converts at build time in the
+  Denormalizer: value × the exact ratio of the two factors,
+  over i128 decimals — no floating point anywhere in the
+  pipeline. An inexact (non-terminating) or type-violating
+  result is a build-time `UnitConversionError`. Factors resolve
+  from the built-in tables — SI and the information units
+  (`b`/`B` with decimal and IEC prefixes; `4 KiB` under a
+  declared `:B` head becomes exactly `4096`) — and from
+  imported `.faiv` definitions, aliases and compound custom
+  dimensions included. Currencies never convert. `.raiv` keeps
+  the authored unit; only the deployment artifact converts.
+- **The elided-type unit annotation `!:unit` (D-15).** An
+  authored annotation may elide the type and carry only the
+  unit: under a schema-defined field it inherits the declared
+  head type (then flows through D-14 conversion); on a
+  schemaless or undefined field it resolves to `float`.
+- **`.faiv` alias canonicalization.** Unit aliases
+  (`&AU=au`) are authoring-side spellings only: the compiler
+  rewrites them to their primary names at annotation
+  acceptance, so canonical lines never carry an alias.
+
+### Changed
+
+- **`!str` retention by intent; the `/^/` lex-saver (D-12).**
+  The schema compiler retains an authored `!str` head as a
+  nominal type commitment; a headless field stays elided. The
+  vacuous pattern `/^/` is the lex-saving spelling for
+  constraining a headless field without a retained head.
+- **`std/core` `b64` tightened to the quad form (D-13).** The
+  pattern now rejects the impossible length class
+  (`4n+1` residues): `^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$`.
+- **`FORMAT_KIND` gates the REQUIRED-header authored kinds.**
+  A missing or mismatched format declaration on the
+  identity-carrying kinds is the spec-named `FORMAT_KIND`
+  lex error, not an ad-hoc message.
+- **Conformance runner: build-error vectors.** A `valid/`
+  vector may carry `expected.error` instead of expected
+  outputs — the pipeline must fail with the named error
+  (`UnitConversionError`, `DelegationSchemaError`, …); the
+  fmt/lift sweeps skip them.
+
 [0.9.0] - 2026-07-29
 --------------------
 

@@ -16,8 +16,11 @@
 /^$/
 &null=
 
-// Base64url-encoded binary data (RFC 4648 section 5, unpadded)
-/^[A-Za-z0-9_-]*$/
+// Base64url-encoded binary data (RFC 4648 section 5, unpadded).
+// The quad form admits exactly the encoded lengths unpadded
+// base64url can produce — 0, 2, or 3 mod 4 (SPEC.md § std/core,
+// D-13); trailing-bit canonicality is deliberately not checked.
+/^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$/
 &b64=
 
 // Multi-line text in readable form — the value is a |:|-separated

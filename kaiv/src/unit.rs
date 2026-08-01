@@ -146,6 +146,30 @@ fn factor_names(expr: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+/// Rewrite `.faiv` alias factor names to their primary targets —
+/// canonical lines never carry an alias (SPEC.md § Unit Definition
+/// Files, names and aliases). `None` when nothing changed.
+pub fn dealias(expr: &str, aliases: &BTreeMap<String, String>) -> Option<String> {
+    let exps = parse_expr(resolve_alias(expr))?;
+    let mut changed = false;
+    let mut out: BTreeMap<String, i64> = BTreeMap::new();
+    for (name, e) in exps {
+        let n = match aliases.get(&name) {
+            Some(t) => {
+                changed = true;
+                t.clone()
+            }
+            None => name,
+        };
+        *out.entry(n).or_insert(0) += e;
+    }
+    if !changed {
+        return None;
+    }
+    out.retain(|_, e| *e != 0);
+    Some(format_exps(&out))
+}
+
 pub fn canonicalize(expr: &str) -> Option<String> {
     Some(format_exps(&parse_expr(resolve_alias(expr))?))
 }
@@ -327,6 +351,11 @@ fn full_name_scale(name: &str) -> Option<(f64, &'static [(&'static str, i64)])> 
         "kat" => (1.0, &[("mol", 1), ("s", -1)]),
         // The litre (prefixable).
         "L" => (0.001, &[("m", 3)]),
+        // Information units: the bit is the base of its own
+        // dimension; the byte is eight bits (SPEC.md § Built-in
+        // units, Information units).
+        "b" => (1.0, &[("b", 1)]),
+        "B" => (8.0, &[("b", 1)]),
         // Non-SI / US-imperial (exact factors per the spec).
         "min" => (60.0, &[("s", 1)]),
         "h" => (3600.0, &[("s", 1)]),
@@ -360,7 +389,286 @@ fn name_scale(name: &str) -> Option<(f64, &'static [(&'static str, i64)])> {
             }
         }
     }
+    if let Some((m, e, stem)) = info_prefix(name) {
+        let (f, exp) = full_name_scale(stem)?;
+        return Some((f * (m as f64) * 10f64.powi(e), exp));
+    }
     None
+}
+
+/// Information-unit prefixes (SPEC.md § Built-in units): the
+/// decimal multiplying set k/M/G/T/P and the IEC binary set
+/// Ki/Mi/Gi/Ti/Pi, attaching to the stems `b` and `B` only —
+/// returns (extra mantissa, extra power of ten, stem).
+fn info_prefix(name: &str) -> Option<(i128, i32, &'static str)> {
+    const IEC: &[&str] = &["Ki", "Mi", "Gi", "Ti", "Pi"];
+    for (i, p) in IEC.iter().enumerate() {
+        if let Some(stem) = name.strip_prefix(p) {
+            if stem == "b" || stem == "B" {
+                let m = 1024i128.pow(i as u32 + 1);
+                return Some((m, 0, if stem == "b" { "b" } else { "B" }));
+            }
+        }
+    }
+    const DEC: &[&str] = &["k", "M", "G", "T", "P"];
+    for (i, p) in DEC.iter().enumerate() {
+        if let Some(stem) = name.strip_prefix(p) {
+            if stem == "b" || stem == "B" {
+                return Some((1, 3 * (i as i32 + 1), if stem == "b" { "b" } else { "B" }));
+            }
+        }
+    }
+    None
+}
+
+/// Exact decimal form (mantissa × 10^exp) of one unprefixed
+/// built-in factor — `full_name_scale`'s frozen table in exact
+/// form, for the build's authored-unit conversion (SPEC.md
+/// § Authored-Unit Conversion, D-14): exact decimal arithmetic
+/// only, no floating point anywhere in the pipeline.
+fn full_name_exact(name: &str) -> Option<(i128, i32)> {
+    Some(match name {
+        "g" | "L" => (1, -3),
+        "min" => (6, 1),
+        "h" => (36, 2),
+        "d" => (864, 2),
+        "t" => (1, 3),
+        "in" => (254, -4),
+        "ft" => (3048, -4),
+        "yd" => (9144, -4),
+        "mi" => (1609344, -3),
+        "nmi" => (1852, 0),
+        "lb" => (45359237, -8),
+        "oz" => (28349523125, -12),
+        "gal" => (3785411784, -12),
+        "B" => (8, 0),
+        _ => {
+            full_name_scale(name)?;
+            (1, 0)
+        }
+    })
+}
+
+/// `name_scale`'s prefix logic over the exact table.
+fn name_exact(name: &str) -> Option<(i128, i32)> {
+    if let Some(hit) = full_name_exact(name) {
+        return Some(hit);
+    }
+    for (p, pow) in PREFIX_POWERS {
+        if let Some(stem) = name.strip_prefix(p) {
+            if prefixable(stem) {
+                let (m, e) = full_name_exact(stem)?;
+                return Some((m, e + pow));
+            }
+        }
+    }
+    if let Some((pm, pe, stem)) = info_prefix(name) {
+        let (m, e) = full_name_exact(stem)?;
+        return Some((m.checked_mul(pm)?, e + pe));
+    }
+    None
+}
+
+/// The exact factor of a unit expression as numerator/denominator
+/// mantissas and a power of ten: factor = (num/den) × 10^e10.
+fn expr_exact(expr: &str) -> Option<(i128, i128, i32)> {
+    expr_exact_with(expr, &BTreeMap::new(), 0)
+}
+
+/// [`expr_exact`] over the built-in tables plus a document's
+/// imported custom-unit definitions. A custom name is exact when
+/// its declared factor parses as a finite decimal and its
+/// dimension expression is itself exact, recursively (aliases
+/// follow their target). Each name contributes a rational
+/// (num, den, e10) — a custom dimension may divide.
+fn expr_exact_with(
+    expr: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+    depth: usize,
+) -> Option<(i128, i128, i32)> {
+    if depth > 8 {
+        return None; // defensive: .faiv definitions cannot cycle
+    }
+    let exps = parse_expr(expr)?;
+    let (mut num, mut den, mut e10): (i128, i128, i32) = (1, 1, 0);
+    for (name, ex) in &exps {
+        let (n, d, e) = name_exact_with(name, customs, depth)?;
+        let reps = u32::try_from(ex.unsigned_abs()).ok()?;
+        let pn = n.checked_pow(reps)?;
+        let pd = d.checked_pow(reps)?;
+        let shift = e.checked_mul(i32::try_from(reps).ok()?)?;
+        if *ex > 0 {
+            num = num.checked_mul(pn)?;
+            den = den.checked_mul(pd)?;
+            e10 = e10.checked_add(shift)?;
+        } else {
+            num = num.checked_mul(pd)?;
+            den = den.checked_mul(pn)?;
+            e10 = e10.checked_sub(shift)?;
+        }
+    }
+    Some((num, den, e10))
+}
+
+/// One factor name as an exact rational times a power of ten:
+/// built-ins from the fixed tables (denominator 1), custom names
+/// via their declared factor times their dimension's expansion.
+fn name_exact_with(
+    name: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+    depth: usize,
+) -> Option<(i128, i128, i32)> {
+    if let Some((m, e)) = name_exact(name) {
+        return Some((m, 1, e));
+    }
+    let mut n = name;
+    let mut hops = 0;
+    let def = loop {
+        let d = customs.get(n)?;
+        match &d.alias_of {
+            Some(a) if hops < 8 => {
+                n = a;
+                hops += 1;
+            }
+            _ => break d,
+        }
+    };
+    let (neg, fm, fe) = parse_dec(def.factor.as_deref()?.trim())?;
+    if neg || fm == 0 {
+        return None; // a factor is a positive decimal by grammar
+    }
+    let (dn, dd, de) = expr_exact_with(&def.dimension, customs, depth + 1)?;
+    Some((fm.checked_mul(dn)?, dd, fe.checked_add(de)?))
+}
+
+/// Outcome of the build's authored-unit conversion (D-14).
+pub enum Convert {
+    /// The exact converted value in the declared unit.
+    Converted(String),
+    /// Not convertible here — different dimensions, a currency, or
+    /// an expression this implementation cannot factor exactly.
+    /// The caller passes the line through; the Validator's unit
+    /// mismatch stands.
+    NotConvertible,
+    /// Same dimension, but the exact result is not a finite
+    /// decimal (or exceeds this implementation's exact range):
+    /// UnitConversionError.
+    Inexact,
+}
+
+/// Convert `value` from unit expression `from` into `to`, exactly
+/// (SPEC.md § Authored-Unit Conversion): the value times the ratio
+/// of the two units' factors, over decimals, with no rounding —
+/// a non-terminating result is `Inexact`, never approximated.
+pub fn convert(value: &str, from: &str, to: &str) -> Convert {
+    convert_with(value, from, to, &BTreeMap::new())
+}
+
+/// [`convert`] over the built-in tables plus a document's imported
+/// custom-unit definitions (`.!units` → `.faiv`) — the factors the
+/// spec's conversion rule resolves from (SPEC.md § Authored-Unit
+/// Conversion). Currencies carry no factor and never convert.
+pub fn convert_with(
+    value: &str,
+    from: &str,
+    to: &str,
+    customs: &BTreeMap<String, crate::faiv::UnitDef>,
+) -> Convert {
+    // Same-dimension check rides the existing scale path (its f64
+    // factor is unused here).
+    let (Some((_, dim_a)), Some((_, dim_d))) = (scale_with(from, customs), scale_with(to, customs))
+    else {
+        return Convert::NotConvertible;
+    };
+    if dim_a != dim_d {
+        return Convert::NotConvertible;
+    }
+    let (Some((an, ad, ae)), Some((dn, dd, de))) = (
+        expr_exact_with(from, customs, 0),
+        expr_exact_with(to, customs, 0),
+    ) else {
+        return Convert::NotConvertible;
+    };
+    // value × (an/ad)/(dn/dd) = value × (an·dd)/(ad·dn)
+    let (Some(num_f), Some(den_f)) = (an.checked_mul(dd), ad.checked_mul(dn)) else {
+        return Convert::Inexact;
+    };
+    let Some((neg, vm, ve)) = parse_dec(value) else {
+        // Value shape is the type pattern's concern, not ours.
+        return Convert::NotConvertible;
+    };
+    let Some(mut n) = vm.checked_mul(num_f) else {
+        return Convert::Inexact;
+    };
+    let Some(mut e) = ve.checked_add(ae).and_then(|x| x.checked_sub(de)) else {
+        return Convert::Inexact;
+    };
+    let mut extra = 0;
+    while n % den_f != 0 {
+        let Some(nn) = n.checked_mul(10) else {
+            return Convert::Inexact;
+        };
+        n = nn;
+        e -= 1;
+        extra += 1;
+        if extra > 64 {
+            return Convert::Inexact;
+        }
+    }
+    n /= den_f;
+    Convert::Converted(format_dec(neg, n, e))
+}
+
+/// Parse a decimal value token exactly: sign, integer mantissa,
+/// power of ten (the float/int token grammar, `[eE]` exponent
+/// folded in).
+fn parse_dec(v: &str) -> Option<(bool, i128, i32)> {
+    let (neg, rest) = match v.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, v),
+    };
+    let (mant, exp10): (&str, i32) = match rest.find(['e', 'E']) {
+        Some(i) => (&rest[..i], rest[i + 1..].parse().ok()?),
+        None => (rest, 0),
+    };
+    let (ip, fp) = match mant.find('.') {
+        Some(i) => (&mant[..i], &mant[i + 1..]),
+        None => (mant, ""),
+    };
+    if ip.is_empty() && fp.is_empty() {
+        return None;
+    }
+    if !ip.bytes().all(|b| b.is_ascii_digit()) || !fp.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let m: i128 = format!("{ip}{fp}").parse().ok()?;
+    let e = exp10.checked_sub(i32::try_from(fp.len()).ok()?)?;
+    Some((neg, m, e))
+}
+
+/// Format an exact decimal as a plain minimal token: no exponent
+/// notation, trailing fractional zeros trimmed, `-0` never emitted.
+fn format_dec(neg: bool, mut m: i128, mut e: i32) -> String {
+    if m == 0 {
+        return "0".into();
+    }
+    while m % 10 == 0 {
+        m /= 10;
+        e += 1;
+    }
+    let digits = m.to_string();
+    let sign = if neg { "-" } else { "" };
+    if e >= 0 {
+        format!("{sign}{digits}{}", "0".repeat(e as usize))
+    } else {
+        let frac = (-e) as usize;
+        if digits.len() > frac {
+            let (ip, fp) = digits.split_at(digits.len() - frac);
+            format!("{sign}{ip}.{fp}")
+        } else {
+            format!("{sign}0.{}{digits}", "0".repeat(frac - digits.len()))
+        }
+    }
 }
 
 /// The numeric scale of a unit expression relative to its SI-base
@@ -621,5 +929,72 @@ mod info_tests {
         );
         assert!(ambiguity_hint("kB").is_none());
         assert!(ambiguity_hint("Km").is_none());
+    }
+
+    fn astro() -> BTreeMap<String, crate::faiv::UnitDef> {
+        let def = |dimension: &str, factor: Option<&str>, alias_of: Option<&str>| {
+            crate::faiv::UnitDef {
+                dimension: dimension.into(),
+                factor: factor.map(Into::into),
+                rate_source: None,
+                alias_of: alias_of.map(Into::into),
+            }
+        };
+        BTreeMap::from([
+            ("au".to_string(), def("m", Some("1.495978707e11"), None)),
+            ("AU".to_string(), def("m", Some("1.495978707e11"), Some("au"))),
+            // A custom defined against a custom (chain depth 2).
+            ("dau".to_string(), def("au", Some("2"), None)),
+            // A custom against a compound dimension.
+            ("mph".to_string(), def("km/h", Some("1.609344"), None)),
+            ("~XYZ".to_string(), def("$", None, None)),
+        ])
+    }
+
+    #[test]
+    fn custom_units_convert_exactly() {
+        let cs = astro();
+        let cv = |v: &str, f: &str, t: &str| match super::convert_with(v, f, t, &cs) {
+            super::Convert::Converted(nv) => Some(nv),
+            _ => None,
+        };
+        // Custom → built-in, exact multiply.
+        assert_eq!(cv("2", "au", "m").as_deref(), Some("299195741400"));
+        assert_eq!(cv("0.0001", "au", "km").as_deref(), Some("14959.78707"));
+        // Built-in → custom, exact when it divides.
+        assert_eq!(cv("149597870700", "m", "au").as_deref(), Some("1"));
+        // Custom → custom through the shared dimension.
+        assert_eq!(cv("4", "dau", "au").as_deref(), Some("8"));
+        // Alias resolves through its target.
+        assert_eq!(cv("2", "AU", "m").as_deref(), Some("299195741400"));
+        // Compound custom dimension: 90 mph = 144.84096 km/h.
+        assert_eq!(cv("90", "mph", "km/h").as_deref(), Some("144.84096"));
+        // Compound expression over a custom name.
+        assert_eq!(cv("0.0001", "au/s", "m/s").as_deref(), Some("14959787.07"));
+    }
+
+    #[test]
+    fn custom_units_inexact_and_nonconvertible() {
+        let cs = astro();
+        // 1 m in au is non-terminating: Inexact, never approximated.
+        assert!(matches!(
+            super::convert_with("1", "m", "au", &cs),
+            super::Convert::Inexact
+        ));
+        // Cross-dimension stays a validator concern.
+        assert!(matches!(
+            super::convert_with("1", "au", "s", &cs),
+            super::Convert::NotConvertible
+        ));
+        // A custom currency carries no factor.
+        assert!(matches!(
+            super::convert_with("1", "~XYZ", "~EUR", &cs),
+            super::Convert::NotConvertible
+        ));
+        // Unknown names without the customs map stay non-convertible.
+        assert!(matches!(
+            super::convert("2", "au", "m"),
+            super::Convert::NotConvertible
+        ));
     }
 }

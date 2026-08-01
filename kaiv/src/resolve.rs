@@ -184,6 +184,35 @@ impl Resolver {
             .collect())
     }
 
+    /// The alias → primary-name map of an imported unit library,
+    /// chains followed (canonical lines never carry an alias —
+    /// SPEC.md § Unit Definition Files).
+    pub fn unit_aliases(
+        &self,
+        lib: &str,
+        layer1: &[(String, String)],
+    ) -> Result<std::collections::BTreeMap<String, String>, PipelineError> {
+        self.unit_names(lib, layer1)?; // ensure cached
+        let cache = self.unit_cache.borrow();
+        let parsed = &cache[lib];
+        let mut map = std::collections::BTreeMap::new();
+        for (name, def) in &parsed.units {
+            let Some(mut target) = def.alias_of.clone() else {
+                continue;
+            };
+            let mut hops = 0;
+            while let Some(next) = parsed.units.get(&target).and_then(|d| d.alias_of.clone()) {
+                if hops >= 8 {
+                    break;
+                }
+                target = next;
+                hops += 1;
+            }
+            map.insert(name.clone(), target);
+        }
+        Ok(map)
+    }
+
     /// The unit definitions of a `.faiv` library, for consumers
     /// that need the conversion factors themselves (e.g. a query
     /// engine scaling custom units to base via
