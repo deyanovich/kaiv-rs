@@ -9,8 +9,11 @@ use crate::error::{LexError, LexErrorAt};
 /// INVALID_CONSTRAINT_ERROR is "schemas only").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileKind {
+    /// Authored `.kaiv` and the canonical `.raiv` / `.daiv`.
     Data,
+    /// `.saiv` schemas and the compiled `.csaiv`.
     Schema,
+    /// `.taiv` type libraries.
     TypeLib,
     /// `.faiv` unit-definition libraries.
     UnitLib,
@@ -20,10 +23,16 @@ pub enum FileKind {
     Mapping,
 }
 
+/// One classified line. The six-rule classifier assigns exactly
+/// one of these to every line of input (SPEC.md § The Six
+/// Rules); payloads borrow from the input text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LineKind<'a> {
+    /// Empty or whitespace-only.
     Blank,
+    /// `//` comment; payload is the text after the marker.
     Comment(&'a str),
+    /// `///` doc comment; payload is the text after the marker.
     Doc(&'a str),
     /// Full declaration line, leading whitespace stripped (`.!kaiv 1`).
     Decl(&'a str),
@@ -38,7 +47,9 @@ pub enum LineKind<'a> {
     /// Rule 5 content line, split on the first `=` outside a quoted
     /// name. `left` is trimmed on both sides; `value` is verbatim.
     Content {
+        /// Everything before the `=`, trimmed.
         left: &'a str,
+        /// Everything after the `=`, verbatim.
         value: &'a str,
     },
     /// Rule 6 metadata annotation (`!type`, `?prov`, `&name`, or a
@@ -51,9 +62,12 @@ pub enum LineKind<'a> {
     VarSplat(&'a str),
 }
 
+/// A classified line and where it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line<'a> {
+    /// 1-based line number in the input.
     pub no: usize,
+    /// What the classifier made of it.
     pub kind: LineKind<'a>,
 }
 
@@ -83,6 +97,11 @@ const DECL_KEYWORDS: &[&str] = &[
     "fk",
 ];
 
+/// Classify every line of `input`.
+///
+/// Eager: the whole text is validated first, so this returns either
+/// every line or the single highest-priority [`LexError`] — never a
+/// partial token stream.
 pub fn lex(input: &[u8], kind: FileKind) -> Result<Vec<Line<'_>>, LexErrorAt> {
     // BOM detection precedes everything, including UTF-8 validation.
     if input.starts_with(&[0xEF, 0xBB, 0xBF]) {
@@ -251,7 +270,9 @@ fn classify<'a>(
             };
             let toks = crate::table::tokens(inner);
             if !toks.first().is_some_and(|p| valid_ns_path(p))
-                || !toks[1..].iter().all(|t| t.starts_with("schema:") || bound_ok(t))
+                || !toks[1..]
+                    .iter()
+                    .all(|t| t.starts_with("schema:") || bound_ok(t))
             {
                 return Err(LexErrorAt {
                     error: LexError::InvalidKey,
@@ -290,7 +311,9 @@ fn classify<'a>(
             let single_pattern = crate::anno::parse_constraint_items(head).is_some_and(|items| {
                 matches!(
                     items.as_slice(),
-                    [crate::anno::Item::Constraint(crate::anno::Constraint::Pattern(_))]
+                    [crate::anno::Item::Constraint(
+                        crate::anno::Constraint::Pattern(_)
+                    )]
                 )
             });
             if single_pattern {
@@ -664,7 +687,10 @@ pub(crate) fn check_key(left: &str, no: usize, kind: FileKind) -> Result<(), Lex
     // `+:=` leave their prefix on the left; schema files add `?=`,
     // type libraries define `&name=`).
     let named_def = key.starts_with('&');
-    if matches!(kind, FileKind::Schema | FileKind::TypeLib | FileKind::UnitLib) {
+    if matches!(
+        kind,
+        FileKind::Schema | FileKind::TypeLib | FileKind::UnitLib
+    ) {
         key = key.strip_suffix('?').unwrap_or(key);
         if matches!(kind, FileKind::TypeLib | FileKind::UnitLib) {
             key = key.strip_prefix('&').unwrap_or(key);
@@ -889,7 +915,10 @@ mod tests {
     fn section_and_ns_open_paths_validated() {
         assert!(one(FileKind::Data, "[/@servers]").is_ok());
         assert_eq!(one(FileKind::Data, "[/servers]"), Err(LexError::InvalidKey));
-        assert_eq!(one(FileKind::Data, "[/@bad-name]"), Err(LexError::InvalidKey));
+        assert_eq!(
+            one(FileKind::Data, "[/@bad-name]"),
+            Err(LexError::InvalidKey)
+        );
         assert!(one(FileKind::Data, "(/server)").is_ok());
         assert!(one(FileKind::Data, "(/server/backup)").is_ok());
         assert_eq!(one(FileKind::Data, "(server)"), Err(LexError::InvalidKey));
@@ -1046,7 +1075,10 @@ mod tests {
         assert!(one(FileKind::Data, "re=5").is_ok());
         assert!(one(FileKind::Data, "/re:=host=a").is_ok());
         // struct-line requires the leading `/` on its ns-path.
-        assert_eq!(one(FileKind::Data, "server:=a=1"), Err(LexError::InvalidKey));
+        assert_eq!(
+            one(FileKind::Data, "server:=a=1"),
+            Err(LexError::InvalidKey)
+        );
     }
 
     #[test]

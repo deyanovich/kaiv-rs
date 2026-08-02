@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 /// Diagnostics for a document, or `None` when the extension carries
 /// no pipeline to run (`.qaiv`, unknown). `Some(vec![])` means the
 /// document is clean and stale diagnostics must be cleared.
+// The `Err` here is an `lsp_types::Diagnostic` (~248 bytes), which
+// trips `result_large_err`. It is never propagated — the Result is
+// built and matched in this function — so boxing would add an
+// allocation to buy nothing.
+#[allow(clippy::result_large_err)]
 pub fn check(uri: &str, text: &str) -> Option<Vec<Diagnostic>> {
     let ext = extension(uri)?;
     let resolver = resolver_for(uri_to_path(uri).as_deref());
@@ -109,8 +114,11 @@ fn resolver_for(path: Option<&Path>) -> kaiv::Resolver {
 fn pipeline_diag(e: kaiv::PipelineError) -> Diagnostic {
     match e {
         kaiv::PipelineError::Lex(l) => lex_diag(l),
-        kaiv::PipelineError::App(a) => diagnostic(0, Some(a.name()), a.name().to_string()),
+        kaiv::PipelineError::App(a) => app_diag(a),
         kaiv::PipelineError::Other(s) => diagnostic(0, None, s),
+        // PipelineError is non-exhaustive: an error kind this build
+        // predates still deserves a diagnostic.
+        other => diagnostic(0, other.name(), other.to_string()),
     }
 }
 
@@ -118,7 +126,6 @@ fn lex_diag(e: kaiv::LexErrorAt) -> Diagnostic {
     diagnostic(e.line, Some(e.error.name()), e.error.name().to_string())
 }
 
-#[allow(dead_code)] // wired in when cross-file validation lands
 fn app_diag(e: kaiv::AppErrorAt) -> Diagnostic {
     let mut message = e.error.name().to_string();
     if !e.context.is_empty() {
@@ -200,11 +207,7 @@ mod tests {
 
     #[test]
     fn schema_pipeline_runs_for_saiv() {
-        let d = check(
-            "file:///tmp/s.saiv",
-            ".!saiv acme/x\n!str\nhost=\n",
-        )
-        .unwrap();
+        let d = check("file:///tmp/s.saiv", ".!saiv acme/x\n!str\nhost=\n").unwrap();
         assert!(d.is_empty(), "{d:?}");
     }
 

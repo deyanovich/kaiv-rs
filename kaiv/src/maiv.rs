@@ -28,24 +28,30 @@ pub struct Mapping {
     pub rules: Vec<Rule>,
 }
 
+/// One mapping rule: where a target field's value comes from.
 #[derive(Debug, Clone)]
 pub struct Rule {
     /// Target namepath (may carry the `/*` wildcard).
     pub target: String,
+    /// What produces the value.
     pub rhs: Rhs,
 }
 
+/// The right side of a mapping rule.
 #[derive(Debug, Clone)]
 pub enum Rhs {
     /// `$source_namepath`, with an optional `|`-override.
     Ref {
+        /// Source namepath the value is read from.
         source: String,
+        /// What to emit when the source value will not do.
         fallback: Option<Fallback>,
     },
     /// A literal constant (the `$$` doubling already collapsed).
     Const(String),
 }
 
+/// The `|`-override on a source reference.
 #[derive(Debug, Clone)]
 pub enum Fallback {
     /// `|constant` — emitted when the source value fails the target
@@ -55,6 +61,7 @@ pub enum Fallback {
     Null,
 }
 
+/// Parse a `.maiv` mapping file.
 pub fn parse_maiv(input: &[u8]) -> Result<Mapping, PipelineError> {
     let lines = lex(input, FileKind::Mapping).map_err(PipelineError::Lex)?;
     let mut seen_maiv = false;
@@ -88,9 +95,19 @@ pub fn parse_maiv(input: &[u8]) -> Result<Mapping, PipelineError> {
                     }
                     seen_maiv = true;
                 } else if let Some(rest) = s.strip_prefix(".!source") {
-                    one(".!source", &mut source, rest.trim_matches([' ', '\t']), line.no)?;
+                    one(
+                        ".!source",
+                        &mut source,
+                        rest.trim_matches([' ', '\t']),
+                        line.no,
+                    )?;
                 } else if let Some(rest) = s.strip_prefix(".!target") {
-                    one(".!target", &mut target, rest.trim_matches([' ', '\t']), line.no)?;
+                    one(
+                        ".!target",
+                        &mut target,
+                        rest.trim_matches([' ', '\t']),
+                        line.no,
+                    )?;
                 } else if let Some(rest) = s.strip_prefix(".!via") {
                     via.push(rest.trim_matches([' ', '\t']).to_string());
                 } else if let Some(rest) = s.strip_prefix(".!drop") {
@@ -159,7 +176,7 @@ fn parse_rhs(value: &str, no: usize) -> Result<Rhs, PipelineError> {
                 // the override constant collides with the delimiter
                 // (SPEC.md § Mapping Lines).
                 if fb.contains('|') {
-                    return Err(PipelineError::App(AppError::DelimiterCollision));
+                    return Err(PipelineError::app(AppError::DelimiterCollision));
                 }
                 let _ = no;
                 Fallback::Constant(fb.to_string())
@@ -278,7 +295,7 @@ pub fn validate_maiv(
             .iter()
             .any(|r| schema_shape(&r.target) == f.namepath);
         if !produced {
-            return Err(PipelineError::App(AppError::IncompleteMapping));
+            return Err(PipelineError::app(AppError::IncompleteMapping));
         }
     }
     Ok(())
@@ -330,6 +347,25 @@ fn bind_target(pattern: &str, idxs: &[&str]) -> String {
 /// suggests (the source line's own annotation for mapped lines,
 /// `str` for constants). Union-typed fields keep the suggestion —
 /// the Validator checks alternative membership.
+/// Is `source_type` one the target field will actually accept?
+///
+/// Only unions need asking: a single-type field re-annotates to its
+/// own declared type, but a union keeps the source's annotation as
+/// the discriminant, and a discriminant matching no alternative is a
+/// `TypeMismatchError` waiting at the target's Validator.
+fn type_admissible(f: &SchemaField, source_type: &str) -> bool {
+    let Some(a) = f.items.iter().find_map(|i| match i {
+        crate::anno::Item::Anno(a) => Some(a),
+        _ => None,
+    }) else {
+        return true;
+    };
+    if a.union.is_empty() {
+        return true;
+    }
+    a.type_name == source_type || a.union.iter().any(|alt| alt.name == source_type)
+}
+
 fn target_annotation(f: &SchemaField, suggested: &str) -> String {
     for item in &f.items {
         if let crate::anno::Item::Anno(a) = item {
@@ -374,9 +410,9 @@ pub fn apply(
         if s.starts_with(".!") {
             continue; // source declarations do not carry over
         }
-        let tick = s.find('\'').ok_or_else(|| {
-            PipelineError::Other(format!("not a canonical line: {s}"))
-        })?;
+        let tick = s
+            .find('\'')
+            .ok_or_else(|| PipelineError::Other(format!("not a canonical line: {s}")))?;
         let prefix = &s[..tick];
         let rest = &s[tick + 1..];
         let eq = crate::validator::first_eq(rest)
@@ -403,8 +439,17 @@ pub fn apply(
             let Some(tf) = field_for(tgt, &rule.target) else {
                 continue; // validate_maiv rejects this; be permissive here
             };
-            let source_type = if a.type_name.is_empty() { "str" } else { &a.type_name };
-            let ok = default_applicable(&tf.items, value);
+            let source_type = if a.type_name.is_empty() {
+                "str"
+            } else {
+                &a.type_name
+            };
+            // Both halves of what the target's Validator will ask:
+            // the value against the field's constraints, and the
+            // annotation against its nominal requirement. Checking
+            // only the value let a declared fallback sit unused
+            // while apply emitted a line that could not validate.
+            let ok = default_applicable(&tf.items, value) && type_admissible(tf, source_type);
             let line = if ok {
                 let t = target_annotation(tf, source_type);
                 format!("!{t}{prov}'{target_np}={value}")
@@ -516,8 +561,7 @@ pub fn compose(a: &Mapping, b: &Mapping) -> Result<Mapping, PipelineError> {
                         return Some((r, None));
                     }
                     match_source(&r.target, source).map(|idxs| {
-                        let owned: Vec<String> =
-                            idxs.iter().map(|i| i.to_string()).collect();
+                        let owned: Vec<String> = idxs.iter().map(|i| i.to_string()).collect();
                         (r, Some(owned))
                     })
                 });
@@ -528,8 +572,7 @@ pub fn compose(a: &Mapping, b: &Mapping) -> Result<Mapping, PipelineError> {
                     Rhs::Ref { source: s0, .. } => {
                         let source = match &idxs {
                             Some(bound) => {
-                                let refs: Vec<&str> =
-                                    bound.iter().map(String::as_str).collect();
+                                let refs: Vec<&str> = bound.iter().map(String::as_str).collect();
                                 bind_target(s0, &refs)
                             }
                             None => s0.clone(),
@@ -574,7 +617,11 @@ impl Mapping {
     /// uses `mapfrom` and reverses the endpoints).
     pub fn edge_path(&self) -> String {
         let sns = self.source.split('/').next().unwrap_or("");
-        match self.target.strip_prefix(sns).and_then(|r| r.strip_prefix('/')) {
+        match self
+            .target
+            .strip_prefix(sns)
+            .and_then(|r| r.strip_prefix('/'))
+        {
             Some(tname) if !sns.is_empty() => {
                 format!("{}/mapto/{tname}", self.source)
             }
@@ -624,7 +671,7 @@ impl Mapping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::{AppError, PipelineError};
+    use crate::error::{AppError, AppErrorAt, PipelineError};
 
     const SRC: &str = ".!saiv acme/fleet\n!str\nlegacy_region=\n[/@servers]\n!str\nhostname=\n!int\nweight=\n[]\n";
     const TGT: &str = ".!saiv hub/nodes\n!null|int\nregion=\n[/@nodes]\n!str\nhost=\n[]\n";
@@ -659,25 +706,82 @@ mod tests {
     }
 
     #[test]
+    fn malformed_mappings_are_rejected_at_parse() {
+        // Mappings are not conformance-vectored, so the parser's
+        // refusals live or die by these.
+        for (src, why) in [
+            (".!source a/s\n.!target b/t\n", "no .!maiv declaration"),
+            (".!maiv\n.!target b/t\n::a=$::b\n", "no .!source"),
+            (".!maiv\n.!source a/s\n::a=$::b\n", "no .!target"),
+            (
+                ".!maiv\n.!source a/s\n.!target b/t\n::a\n",
+                "rule without =",
+            ),
+        ] {
+            assert!(
+                parse_maiv(src.as_bytes()).is_err(),
+                "accepted a mapping with {why}: {src:?}"
+            );
+        }
+        // The minimum viable mapping parses.
+        let m = parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n::a=$::b\n").unwrap();
+        assert_eq!(m.rules.len(), 1);
+    }
+
+    #[test]
+    fn apply_refuses_input_that_is_not_a_daiv() {
+        let m = parse_maiv(MAP.as_bytes()).unwrap();
+        let (_, tgt) = schemas();
+        // Authored kaiv is not the input contract — apply takes
+        // canonical data, and silently treating a .kaiv as one would
+        // map against un-denormalized namepaths.
+        let authored = ".!kaiv 1\n!str\nlegacy_region=eu\n";
+        assert!(apply(&m, authored, &tgt).is_err());
+        // A .daiv missing its declaration is equally not canonical.
+        assert!(apply(&m, "!str'::legacy_region=eu\n", &tgt).is_err());
+    }
+
+    #[test]
+    fn a_source_field_the_mapping_does_not_read_is_simply_dropped() {
+        // Only `.!drop` is *declared*; anything else unreferenced
+        // just does not appear downstream. Pin that, since it is the
+        // difference between a lossy mapping and a broken one.
+        let m = parse_maiv(MAP.as_bytes()).unwrap();
+        let (_, tgt) = schemas();
+        let daiv = ".!daiv\n!str'::legacy_region=7\n!str'/@servers/0::hostname=a\n!int'/@servers/0::weight=9\n";
+        let out = apply(&m, daiv, &tgt).unwrap();
+        assert!(!out.contains("weight"), "{out}");
+        assert!(!out.contains("legacy_region"), "{out}");
+        assert!(out.contains("!str'/@nodes/0::host=a\n"), "{out}");
+        // The target declares `!null|int` and the source line is
+        // `!str`, which is no alternative of that union — so the
+        // declared `|!null` fallback fires, even though the value
+        // text "7" would satisfy the int constraint on its own.
+        // Emitting `!str` here produced a document that failed
+        // validation against the very schema it was mapped into.
+        assert!(out.contains("!null'::region=\n"), "{out}");
+        assert!(crate::validate(&out, &tgt).is_ok(), "{out}");
+    }
+
+    #[test]
     fn publish_time_rejections() {
         let (src, tgt) = schemas();
         // Unknown source namepath.
-        let m = parse_maiv(
-            b".!maiv\n.!source a/s\n.!target b/t\n/@nodes/*::host=$::nope\n",
-        )
-        .unwrap();
+        let m =
+            parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n/@nodes/*::host=$::nope\n").unwrap();
         assert!(validate_maiv(&m, &src, &tgt).is_err());
         // Required target field produced by nothing.
         let m = parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n").unwrap();
         assert!(matches!(
             validate_maiv(&m, &src, &tgt),
-            Err(PipelineError::App(AppError::IncompleteMapping))
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::IncompleteMapping,
+                ..
+            }))
         ));
         // Override constant must satisfy the target constraint.
-        let m = parse_maiv(
-            b".!maiv\n.!source a/s\n.!target b/t\n::region=$::legacy_region|oops\n",
-        )
-        .unwrap();
+        let m = parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n::region=$::legacy_region|oops\n")
+            .unwrap();
         assert!(validate_maiv(&m, &src, &tgt).is_err());
     }
 
@@ -705,10 +809,8 @@ mod tests {
 
     #[test]
     fn same_namespace_edge_path_is_short() {
-        let m = parse_maiv(
-            b".!maiv\n.!source acme/config-v1\n.!target acme/config-v2\n::a=$::a\n",
-        )
-        .unwrap();
+        let m = parse_maiv(b".!maiv\n.!source acme/config-v1\n.!target acme/config-v2\n::a=$::a\n")
+            .unwrap();
         // The target's namespace equals the source's: the canonical
         // derived path omits it (3-segment short form).
         assert_eq!(m.edge_path(), "acme/config-v1/mapto/config-v2");
@@ -716,16 +818,17 @@ mod tests {
 
     #[test]
     fn constants_and_doubling() {
-        let m = parse_maiv(
-            b".!maiv\n.!source a/s\n.!target b/t\n::api_version=v2\n::price=$$5\n",
-        )
-        .unwrap();
+        let m = parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n::api_version=v2\n::price=$$5\n")
+            .unwrap();
         assert!(matches!(&m.rules[0].rhs, Rhs::Const(c) if c == "v2"));
         assert!(matches!(&m.rules[1].rhs, Rhs::Const(c) if c == "$5"));
         // A literal | in an override constant collides.
         assert!(matches!(
             parse_maiv(b".!maiv\n.!source a/s\n.!target b/t\n::a=$::b|x|y\n"),
-            Err(PipelineError::App(AppError::DelimiterCollision))
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::DelimiterCollision,
+                ..
+            }))
         ));
     }
 }

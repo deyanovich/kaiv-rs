@@ -34,7 +34,6 @@ use crate::error::PipelineError;
 use crate::json::Val;
 use crate::jsonschema::kaiv_key;
 
-
 /// The implicit inclusive bounds of XSD's bounded integer built-ins
 /// (kept in step with `builtin`); (None, None) for everything else.
 fn int_base_bounds(local: &str) -> (Option<&'static str>, Option<&'static str>) {
@@ -59,6 +58,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert an XML Schema (XSD) type to an authored `.saiv`.
 pub fn import_schema(
     input: &[u8],
     element: Option<&str>,
@@ -113,9 +113,8 @@ pub fn import_schema(
         .ok_or_else(|| err("the root element has no name"))?;
     let root_path = format!(
         "/{}",
-        kaiv_key(root_field).map_err(|_| err(format!(
-            "unrepresentable root element name: {root_field:?}"
-        )))?
+        kaiv_key(root_field)
+            .map_err(|_| err(format!("unrepresentable root element name: {root_field:?}")))?
     );
     match shape {
         Shape::Complex(ct) => ctx.complex_fields(ct, &root_path, false, &mut Vec::new())?,
@@ -339,9 +338,9 @@ impl<'a> Ctx<'a> {
             // String-shaped built-ins; hexBinary content is hex TEXT,
             // so it stays a string rather than riding &bin.
             "string" | "normalizedString" | "token" | "language" | "Name" | "NCName" | "ID"
-            | "IDREF" | "IDREFS" | "ENTITY" | "NMTOKEN" | "NMTOKENS" | "QName"
-            | "NOTATION" | "duration" | "gYear" | "gYearMonth" | "gMonth" | "gMonthDay"
-            | "gDay" | "hexBinary" => None,
+            | "IDREF" | "IDREFS" | "ENTITY" | "NMTOKEN" | "NMTOKENS" | "QName" | "NOTATION"
+            | "duration" | "gYear" | "gYearMonth" | "gMonth" | "gMonthDay" | "gDay"
+            | "hexBinary" => None,
             _ => return None,
         };
         Some(anno)
@@ -589,11 +588,7 @@ impl<'a> Ctx<'a> {
                     _ => None,
                 },
             };
-            self.push_scalar(
-                anno,
-                &lhs(path, &key),
-                usage != "required" || all_optional,
-            );
+            self.push_scalar(anno, &lhs(path, &key), usage != "required" || all_optional);
         }
         Ok(())
     }
@@ -714,7 +709,10 @@ impl<'a> Ctx<'a> {
                 self.push_scalar(anno, "\"#text\"", true);
                 return Ok(());
             }
-            self.note(&format!("simpleContent restriction at {}", disp2(path, ename)));
+            self.note(&format!(
+                "simpleContent restriction at {}",
+                disp2(path, ename)
+            ));
             return Ok(());
         }
         for at in self.sch.kids(ct, "attribute") {

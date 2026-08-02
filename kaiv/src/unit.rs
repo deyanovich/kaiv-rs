@@ -79,9 +79,7 @@ pub fn ambiguity_hint(expr: &str) -> Option<String> {
             "B" => ("kB (1000 B)", "KiB (1024 B)"),
             _ => ("kb (1000 b)", "Kib (1024 b)"),
         };
-        return Some(format!(
-            "K{stem} is ambiguous: write {dec} or {bin}"
-        ));
+        return Some(format!("K{stem} is ambiguous: write {dec} or {bin}"));
     }
     None
 }
@@ -170,6 +168,9 @@ pub fn dealias(expr: &str, aliases: &BTreeMap<String, String>) -> Option<String>
     Some(format_exps(&out))
 }
 
+/// The canonical spelling of a unit expression — factors
+/// ASCII-sorted, exponents collapsed, shared factors cancelled
+/// (`"m*s/s"` → `"m"`). `None` if the expression is ungrammatical.
 pub fn canonicalize(expr: &str) -> Option<String> {
     Some(format_exps(&parse_expr(resolve_alias(expr))?))
 }
@@ -539,6 +540,7 @@ fn name_exact_with(
 }
 
 /// Outcome of the build's authored-unit conversion (D-14).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Convert {
     /// The exact converted value in the declared unit.
     Converted(String),
@@ -613,8 +615,21 @@ pub fn convert_with(
         }
     }
     n /= den_f;
+    // `format_dec` writes the result positionally, so the token length
+    // grows with |e| — an authored `1e2000000000` would ask for a
+    // two-gigabyte string. Beyond this bound the value is outside the
+    // range this implementation converts exactly (the documented
+    // `Inexact` case), not something to allocate.
+    if e.unsigned_abs() > MAX_EXP {
+        return Convert::Inexact;
+    }
     Convert::Converted(format_dec(neg, n, e))
 }
+
+/// The widest positional exponent [`convert_with`] will materialize:
+/// the converted token stays under ~4 KB, which covers every value a
+/// finite decimal type realistically carries.
+const MAX_EXP: u32 = 4096;
 
 /// Parse a decimal value token exactly: sign, integer mantissa,
 /// power of ten (the float/int token grammar, `[eE]` exponent
@@ -702,29 +717,32 @@ fn scale_with_depth(
     let mut factor = 1.0f64;
     let mut base: BTreeMap<String, i64> = BTreeMap::new();
     for (name, e) in &exps {
-        let (f, bmap): (f64, BTreeMap<String, i64>) =
-            if let Some((f, expansion)) = name_scale(name) {
-                (
-                    f,
-                    expansion.iter().map(|(b, be)| (b.to_string(), *be)).collect(),
-                )
-            } else {
-                let mut n = name.as_str();
-                let mut hops = 0;
-                let def = loop {
-                    let d = customs.get(n)?;
-                    match &d.alias_of {
-                        Some(a) if hops < 8 => {
-                            n = a;
-                            hops += 1;
-                        }
-                        _ => break d,
+        let (f, bmap): (f64, BTreeMap<String, i64>) = if let Some((f, expansion)) = name_scale(name)
+        {
+            (
+                f,
+                expansion
+                    .iter()
+                    .map(|(b, be)| (b.to_string(), *be))
+                    .collect(),
+            )
+        } else {
+            let mut n = name.as_str();
+            let mut hops = 0;
+            let def = loop {
+                let d = customs.get(n)?;
+                match &d.alias_of {
+                    Some(a) if hops < 8 => {
+                        n = a;
+                        hops += 1;
                     }
-                };
-                let f: f64 = def.factor.as_deref()?.trim().parse().ok()?;
-                let (df, dmap) = scale_with_depth(&def.dimension, customs, depth + 1)?;
-                (f * df, dmap)
+                    _ => break d,
+                }
             };
+            let f: f64 = def.factor.as_deref()?.trim().parse().ok()?;
+            let (df, dmap) = scale_with_depth(&def.dimension, customs, depth + 1)?;
+            (f * df, dmap)
+        };
         // An exponent that does not fit i32 is unscalable rather than
         // silently wrapped modulo 2^32 to a plausible-but-wrong factor.
         let e32 = i32::try_from(*e).ok()?;
@@ -885,14 +903,18 @@ mod info_tests {
 
     #[test]
     fn information_units_are_builtin() {
-        for u in ["b", "B", "kB", "MB", "GB", "TB", "PB", "kb", "Mb", "Gb", "Tb",
-                  "KiB", "MiB", "GiB", "TiB", "PiB", "Kib", "Mib", "Gib"] {
+        for u in [
+            "b", "B", "kB", "MB", "GB", "TB", "PB", "kb", "Mb", "Gb", "Tb", "KiB", "MiB", "GiB",
+            "TiB", "PiB", "Kib", "Mib", "Gib",
+        ] {
             assert!(builtin(u), "{u} must be built-in");
             assert_eq!(canonicalize(u).as_deref(), Some(u), "{u} is canonical");
         }
         // Only multiplying prefixes: no millibytes, no hectobits —
         // and no kibimeters (IEC prefixes are information-only).
-        for u in ["mB", "cB", "hB", "daB", "uB", "nb", "Kim", "Mis", "KB", "Kb"] {
+        for u in [
+            "mB", "cB", "hB", "daB", "uB", "nb", "Kim", "Mis", "KB", "Kb",
+        ] {
             assert!(!builtin(u), "{u} must not be built-in");
         }
     }
@@ -929,17 +951,19 @@ mod info_tests {
     }
 
     fn astro() -> BTreeMap<String, crate::faiv::UnitDef> {
-        let def = |dimension: &str, factor: Option<&str>, alias_of: Option<&str>| {
-            crate::faiv::UnitDef {
+        let def =
+            |dimension: &str, factor: Option<&str>, alias_of: Option<&str>| crate::faiv::UnitDef {
                 dimension: dimension.into(),
                 factor: factor.map(Into::into),
                 rate_source: None,
                 alias_of: alias_of.map(Into::into),
-            }
-        };
+            };
         BTreeMap::from([
             ("au".to_string(), def("m", Some("1.495978707e11"), None)),
-            ("AU".to_string(), def("m", Some("1.495978707e11"), Some("au"))),
+            (
+                "AU".to_string(),
+                def("m", Some("1.495978707e11"), Some("au")),
+            ),
             // A custom defined against a custom (chain depth 2).
             ("dau".to_string(), def("au", Some("2"), None)),
             // A custom against a compound dimension.
@@ -992,6 +1016,23 @@ mod info_tests {
         assert!(matches!(
             super::convert("2", "au", "m"),
             super::Convert::NotConvertible
+        ));
+    }
+
+    #[test]
+    fn a_huge_exponent_is_inexact_not_a_gigabyte_string() {
+        // `format_dec` writes positionally: this once allocated a
+        // two-gigabyte token from a twelve-character value.
+        for v in ["1e2000000000", "1e-2000000000", "-1e999999999"] {
+            assert!(
+                matches!(super::convert(v, "km", "m"), super::Convert::Inexact),
+                "{v}"
+            );
+        }
+        // Values within the bound still convert exactly.
+        assert!(matches!(
+            super::convert("1e30", "km", "m"),
+            super::Convert::Converted(ref s) if s.len() == 34
         ));
     }
 }

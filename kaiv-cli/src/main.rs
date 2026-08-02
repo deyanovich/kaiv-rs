@@ -8,6 +8,7 @@
 //! KAIV_REGISTRY environment variables.
 
 mod account;
+mod publish;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -142,6 +143,15 @@ COMMANDS:
                                       --message picks the root
                                       message/type/element when the
                                       schema declares several
+    publish  <paths...> [--batch]     publish artifacts to the kaiv
+                                      registries: single-file deposit,
+                                      or --batch for a set of files/
+                                      directories sent as SRCN packs
+                                      per cella with fixed-point
+                                      dependency rounds. --dry-run
+                                      prints the plan; --production
+                                      unlocks the k*aiv.com hosts.
+                                      Full flags: `kaiv publish --help`
     login    [email]                  sign in to the kaiv registries
                                       (idaiv): an emailed one-time
                                       link approves this device; the
@@ -396,6 +406,7 @@ fn run_text(args: &[String]) -> Result<String, String> {
                 _ => kaiv::jsonschema::import(&data, &name).map_err(|e| e.to_string()),
             }
         }
+        ("publish", rest) => publish::cmd(rest),
         ("login", rest) if rest.len() <= 1 => {
             let email = match rest.first() {
                 Some(e) => e.clone(),
@@ -419,11 +430,13 @@ fn run_text(args: &[String]) -> Result<String, String> {
             ))
         }
         ("whoami", []) => {
-            let mut credentials = account::load()?
-                .ok_or("not signed in — run `kaiv login`")?;
+            let mut credentials = account::load()?.ok_or("not signed in — run `kaiv login`")?;
             let (id, email, handle) = account::whoami(&mut credentials)?;
             let handle = handle.map(|h| format!(" ({h})")).unwrap_or_default();
-            Ok(format!("{email}{handle}\nid: {id}\nissuer: {}\n", credentials.issuer))
+            Ok(format!(
+                "{email}{handle}\nid: {id}\nissuer: {}\n",
+                credentials.issuer
+            ))
         }
         ("logout", []) => match account::load()? {
             Some(credentials) => {
@@ -439,7 +452,9 @@ fn run_text(args: &[String]) -> Result<String, String> {
             let text = String::from_utf8(data).map_err(|e| e.to_string())?;
             kaiv::unbuild(&text).map_err(|e| e.to_string())
         }
-        ("unbuild", _) => Err("unbuild takes at most one file (got extra arguments); see `kaiv help`".into()),
+        ("unbuild", _) => {
+            Err("unbuild takes at most one file (got extra arguments); see `kaiv help`".into())
+        }
         ("unit", [expr]) => kaiv::unit::canonicalize(expr)
             .map(|c| format!("{c}\n"))
             .ok_or_else(|| {
@@ -511,9 +526,7 @@ fn run_text(args: &[String]) -> Result<String, String> {
             }
         }
         ("help" | "--help" | "-h", _) => Ok(format!("{USAGE}\n")),
-        ("version" | "--version" | "-V", _) => {
-            Ok(format!("kaiv {}\n", env!("CARGO_PKG_VERSION")))
-        }
+        ("version" | "--version" | "-V", _) => Ok(format!("kaiv {}\n", env!("CARGO_PKG_VERSION"))),
         // Known commands with the wrong argument count get a specific
         // message rather than "unknown command".
         (cmd @ ("compile" | "denorm" | "build" | "schema"), _) => Err(format!(
@@ -795,11 +808,9 @@ fn read_input(path: Option<&str>) -> Result<Vec<u8>, String> {
             // Fail loudly; an intentionally empty document can be
             // passed as a file.
             if buf.is_empty() {
-                return Err(
-                    "empty input on stdin (upstream failure in a pipeline?); \
+                return Err("empty input on stdin (upstream failure in a pipeline?); \
                      pass an empty file to process an empty document"
-                        .into(),
-                );
+                    .into());
             }
             Ok(buf)
         }
@@ -844,8 +855,7 @@ fn fmt_cmd(rest: &[String]) -> Result<String, String> {
     }
     let canonical = opens_with_kind(&text, "daiv")
         || opens_with_kind(&text, "raiv")
-        || ((ext.ends_with(".daiv") || ext.ends_with(".raiv"))
-            && !opens_with_kind(&text, "kaiv"));
+        || ((ext.ends_with(".daiv") || ext.ends_with(".raiv")) && !opens_with_kind(&text, "kaiv"));
     if canonical {
         return Err(
             "canonical .daiv/.raiv has exactly one spelling — nothing to format; \
@@ -989,7 +999,10 @@ fn finish<T>(res: Result<T, kaiv::PipelineError>, r: &kaiv::Resolver) -> Result<
         for ev in &events {
             match ev.layer {
                 ResolutionLayer::Preload => {
-                    eprintln!("kaiv: resolved {}.{} from preloaded sources", ev.lib, ev.ext)
+                    eprintln!(
+                        "kaiv: resolved {}.{} from preloaded sources",
+                        ev.lib, ev.ext
+                    )
                 }
                 // A Layer 1 event without a location is a strict-mode
                 // refusal recorded before any read.
@@ -1012,10 +1025,7 @@ fn finish<T>(res: Result<T, kaiv::PipelineError>, r: &kaiv::Resolver) -> Result<
         }
     }
     res.map_err(|e| {
-        if matches!(
-            e,
-            kaiv::PipelineError::App(kaiv::AppError::RegistryStrict)
-        ) {
+        if matches!(&e, kaiv::PipelineError::App(a) if a.error == kaiv::AppError::RegistryStrict) {
             let blocked: Vec<String> = events
                 .iter()
                 .filter(|ev| ev.layer == ResolutionLayer::Layer1)

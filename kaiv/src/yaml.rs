@@ -22,6 +22,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert a YAML document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let text = std::str::from_utf8(input).map_err(|_| err("input is not valid UTF-8"))?;
     let docs = YamlLoader::load_from_str(text).map_err(|e| err(format!("invalid YAML: {e}")))?;
@@ -123,13 +124,14 @@ fn scalar_key(y: &Yaml) -> Result<String, PipelineError> {
     }
 }
 
+/// Convert a canonical `.raiv` / `.daiv` to YAML.
 pub fn export(canonical: &str) -> Result<String, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,
@@ -256,5 +258,18 @@ mod tests {
     fn multi_document_rejected() {
         assert!(import(b"a: 1\n---\nb: 2\n").is_err());
         assert!(import(b"- just\n- a\n- list\n").is_err());
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_not_recursed() {
+        // `to_val` walks the parse tree recursively with no depth
+        // counter of its own — the bound is the YAML parser's. Pin it:
+        // if a dependency bump lifts it, this fails instead of
+        // overflowing the stack on untrusted input.
+        let mut s = String::from("a: ");
+        s.push_str(&"[".repeat(50_000));
+        s.push_str(&"]".repeat(50_000));
+        s.push('\n');
+        assert!(import(s.as_bytes()).is_err());
     }
 }

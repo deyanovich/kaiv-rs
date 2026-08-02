@@ -1,8 +1,8 @@
 [package]
 name = "kaiv-cli"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
-rust-version = "1.84.0"
+rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/kaiv-format/kaiv-rs"
 authors = ["Bojan Đuričković"]
@@ -17,7 +17,13 @@ name = "kaiv"
 path = "src/main.rs"
 
 [dependencies]
-kaiv = { path = "../kaiv", version = "0.11.0", features = ["json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
-# Already in the tree via kaiv's default `net` feature; declared
-# here so the login flow (account.rs) can drive it directly.
+# `net` is opt-in for the library but intrinsic to the CLI: registry
+# resolution is what `kaiv validate` does against a hosted schema.
+kaiv = { path = "../kaiv", version = "0.12.0", features = ["net", "json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
+# Already in the tree via kaiv's `net` feature; declared here so the
+# login flow (account.rs) can drive it directly.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
+# Content addresses for kdaiv deposits (`kaiv publish` names
+# .daiv artifacts by their BLAKE3 hex, the same dependency the
+# gate and kaiv-wasm use).
+blake3 = "1"

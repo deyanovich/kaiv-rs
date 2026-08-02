@@ -35,6 +35,11 @@ struct Ctx<'a> {
     imports: BTreeSet<&'static str>,
 }
 
+/// Convert a JSON Schema to an authored `.saiv` named `name`.
+///
+/// A sound weakening: every constraint emitted is implied by the
+/// source schema, and anything without a kaiv equivalent is dropped
+/// with a `//` note rather than approximated.
 pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
     let text = std::str::from_utf8(input).map_err(|_| err("input is not valid UTF-8"))?;
     let root = parse_val(text)?;
@@ -47,8 +52,11 @@ pub fn import(input: &[u8], name: &str) -> Result<String, PipelineError> {
         imports: BTreeSet::new(),
     };
     let resolved = ctx.resolve(&root, 0)?;
+    // A root `$ref` may target a non-object (`resolve` returns any
+    // non-object target verbatim) — that is malformed input, not an
+    // impossible state.
     let Val::Obj(top) = &resolved else {
-        unreachable!()
+        return Err(err("$ref target is not a schema object"));
     };
     let root_ok = match get(top, "type") {
         None => true,
@@ -81,7 +89,13 @@ impl<'a> Ctx<'a> {
         // it into a second, malformed line.
         let clean: String = msg
             .chars()
-            .map(|c| if matches!(c, '\n' | '\r' | '\0') { ' ' } else { c })
+            .map(|c| {
+                if matches!(c, '\n' | '\r' | '\0') {
+                    ' '
+                } else {
+                    c
+                }
+            })
             .collect();
         self.body.push_str(&format!("// dropped: {clean}\n"));
     }
@@ -323,11 +337,7 @@ impl<'a> Ctx<'a> {
                                             ));
                                             continue;
                                         };
-                                        self.scalar_annotation(
-                                            iso,
-                                            t,
-                                            ireq.contains(ip.as_str()),
-                                        )?;
+                                        self.scalar_annotation(iso, t, ireq.contains(ip.as_str()))?;
                                         self.body.push_str(&format!(
                                             "{ikey}{}=\n",
                                             if ireq.contains(ip.as_str()) { "" } else { "?" }
@@ -866,7 +876,8 @@ mod tests {
             Err(crate::AppError::RequiredFieldSchema)
         );
         assert_eq!(
-            crate::validate(".!daiv\n!str'::name=api\n!int'::port=99999\n", &sc).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'::name=api\n!int'::port=99999\n", &sc)
+                .map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }
@@ -899,7 +910,8 @@ mod tests {
             crate::validate(
                 ".!daiv\n!str'::pre=a/b\n!str'::backref=\n!str'::shorthand=\n!str'::re=x\n",
                 &sc
-            ).map_err(|e| e.error),
+            )
+            .map_err(|e| e.error),
             Ok(())
         );
     }
@@ -960,7 +972,10 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("// dropped: multipleOf"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!daiv\n!int'::n=7\n", &sc).map_err(|e| e.error), Ok(()));
+        assert_eq!(
+            crate::validate(".!daiv\n!int'::n=7\n", &sc).map_err(|e| e.error),
+            Ok(())
+        );
     }
 
     #[test]
@@ -972,7 +987,10 @@ mod tests {
         let saiv = import(src, "t").unwrap();
         assert!(saiv.contains("/^\\/[a-z\\/]+$/\npath?=\n"));
         let sc = compiles(&saiv);
-        assert_eq!(crate::validate(".!daiv\n!str'::path=/a/b\n", &sc).map_err(|e| e.error), Ok(()));
+        assert_eq!(
+            crate::validate(".!daiv\n!str'::path=/a/b\n", &sc).map_err(|e| e.error),
+            Ok(())
+        );
     }
 }
 
@@ -997,6 +1015,26 @@ mod untyped_enum_tests {
         assert!(out.contains("!null|float{0.5,1}\nratio?=\n"), "{out}");
         assert!(out.contains("!null|bool{true}\nflag?=\n"), "{out}");
         // A genuinely mixed enum still drops with the note.
-        assert!(out.contains("// dropped: untyped property at root/mixed"), "{out}");
+        assert!(
+            out.contains("// dropped: untyped property at root/mixed"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn root_ref_to_a_non_object_is_an_error() {
+        // `resolve` hands back a non-object `$ref` target verbatim, so
+        // the root can legitimately resolve to a scalar — malformed
+        // input, and once a panic.
+        for js in [
+            r##"{"$defs":{"x":"hello"},"$ref":"#/$defs/x"}"##,
+            r##"{"$defs":{"x":[1,2]},"$ref":"#/definitions/x"}"##,
+            r##"{"definitions":{"x":7},"$ref":"#/definitions/x"}"##,
+        ] {
+            assert!(
+                crate::jsonschema::import(js.as_bytes(), "acme/x").is_err(),
+                "{js}"
+            );
+        }
     }
 }

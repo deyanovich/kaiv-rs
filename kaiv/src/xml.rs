@@ -36,6 +36,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert an XML document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let text = std::str::from_utf8(input).map_err(|_| err("input is not valid UTF-8"))?;
     let (name, val) = parse_doc(text)?;
@@ -403,13 +404,14 @@ fn elem_val(e: &Elem) -> Result<Val, PipelineError> {
 
 // --------------------------------------------------------------- export
 
+/// Convert a canonical `.raiv` / `.daiv` to XML.
 pub fn export(canonical: &str) -> Result<String, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,

@@ -3,7 +3,7 @@
 //! Any `#[derive(Serialize)]` type serializes straight to canonical
 //! `.daiv` lines through [`serialize_into`] — no intermediate value
 //! tree — and any `#[derive(Deserialize)]` type reads back out of a
-//! parsed [`Doc`](crate::doc::Doc) view through [`from_view`]. The
+//! parsed [`crate::doc::Doc`] view through [`from_view`]. The
 //! mapping mirrors the canonical namepath model:
 //!
 //! - struct / map fields → `{prefix}::field` scalars,
@@ -80,11 +80,14 @@ impl From<Error> for PipelineError {
 
 /// A field's wire-type override (matched by field name, wherever the
 /// field appears).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum Head {
     /// Emit string values as `!text` (single- or multi-line), with
     /// the named `std/enc` payload kind on separator collision.
-    Text { embed: &'static str },
+    Text {
+        /// The `std/enc` payload kind (`json`, …).
+        embed: &'static str,
+    },
     /// Emit string values under this named type — the union
     /// discriminant (`forum/core/flair`, `std/time/datetime`, …).
     Named(&'static str),
@@ -160,7 +163,8 @@ impl<'a, 'h> Ser<'a, 'h> {
             }
         } else if self.b.leaf(&self.scalar, "str", s, None).is_err() {
             // Flat-line rules (leading `$`, NUL): embed verbatim.
-            self.b.leaf_embed(&self.scalar, "plain", s.as_bytes(), None)?;
+            self.b
+                .leaf_embed(&self.scalar, "plain", s.as_bytes(), None)?;
         }
         Ok(())
     }
@@ -241,7 +245,9 @@ impl<'a, 'h> SerTrait for Ser<'a, 'h> {
         _: &'static str,
         _: &T,
     ) -> Result<(), Error> {
-        Err(Error(format!("kaiv: enum data variants unsupported ({name})")))
+        Err(Error(format!(
+            "kaiv: enum data variants unsupported ({name})"
+        )))
     }
     fn serialize_seq(self, _: Option<usize>) -> Result<SerSeq<'a, 'h>, Error> {
         Ok(SerSeq {
@@ -254,11 +260,7 @@ impl<'a, 'h> SerTrait for Ser<'a, 'h> {
     fn serialize_tuple(self, len: usize) -> Result<SerSeq<'a, 'h>, Error> {
         self.serialize_seq(Some(len))
     }
-    fn serialize_tuple_struct(
-        self,
-        _: &'static str,
-        len: usize,
-    ) -> Result<SerSeq<'a, 'h>, Error> {
+    fn serialize_tuple_struct(self, _: &'static str, len: usize) -> Result<SerSeq<'a, 'h>, Error> {
         self.serialize_seq(Some(len))
     }
     fn serialize_tuple_variant(
@@ -268,7 +270,9 @@ impl<'a, 'h> SerTrait for Ser<'a, 'h> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeTupleVariant, Error> {
-        Err(Error(format!("kaiv: enum data variants unsupported ({name})")))
+        Err(Error(format!(
+            "kaiv: enum data variants unsupported ({name})"
+        )))
     }
     fn serialize_map(self, _: Option<usize>) -> Result<SerFields<'a, 'h>, Error> {
         Ok(SerFields {
@@ -278,11 +282,7 @@ impl<'a, 'h> SerTrait for Ser<'a, 'h> {
             key: None,
         })
     }
-    fn serialize_struct(
-        self,
-        _: &'static str,
-        _: usize,
-    ) -> Result<SerFields<'a, 'h>, Error> {
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<SerFields<'a, 'h>, Error> {
         Ok(SerFields {
             b: self.b,
             heads: self.heads,
@@ -297,7 +297,9 @@ impl<'a, 'h> SerTrait for Ser<'a, 'h> {
         _: &'static str,
         _: usize,
     ) -> Result<Self::SerializeStructVariant, Error> {
-        Err(Error(format!("kaiv: enum data variants unsupported ({name})")))
+        Err(Error(format!(
+            "kaiv: enum data variants unsupported ({name})"
+        )))
     }
 }
 
@@ -344,7 +346,10 @@ impl<'a, 'h> SerializeMap for SerFields<'a, 'h> {
     fn serialize_key<T: Serialize + ?Sized>(&mut self, key: &T) -> Result<(), Error> {
         let mut sink = KeyText(None);
         key.serialize(&mut sink)?;
-        self.key = Some(sink.0.ok_or_else(|| Error("kaiv: map key must be a string".into()))?);
+        self.key = Some(
+            sink.0
+                .ok_or_else(|| Error("kaiv: map key must be a string".into()))?,
+        );
         Ok(())
     }
     fn serialize_value<T: Serialize + ?Sized>(&mut self, value: &T) -> Result<(), Error> {
@@ -414,7 +419,7 @@ impl<'a, 'h> ::serde::ser::SerializeTupleStruct for SerSeq<'a, 'h> {
 /// A serializer that accepts exactly one string (map keys).
 struct KeyText(Option<String>);
 
-impl<'a> SerTrait for &'a mut KeyText {
+impl SerTrait for &mut KeyText {
     type Ok = ();
     type Error = Error;
     type SerializeSeq = ::serde::ser::Impossible<(), Error>;
@@ -430,42 +435,120 @@ impl<'a> SerTrait for &'a mut KeyText {
         Ok(())
     }
 
-    ::serde::serde_if_integer128! {
-        fn serialize_i128(self, _: i128) -> Result<(), Error> {
-            Err(Error("kaiv: map key must be a string".into()))
-        }
-        fn serialize_u128(self, _: u128) -> Result<(), Error> {
-            Err(Error("kaiv: map key must be a string".into()))
-        }
+    fn serialize_i128(self, _: i128) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_u128(self, _: u128) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
     }
 
-    fn serialize_bool(self, _: bool) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_i8(self, _: i8) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_i16(self, _: i16) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_i32(self, _: i32) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_i64(self, _: i64) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_u8(self, _: u8) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_u16(self, _: u16) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_u32(self, _: u32) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_u64(self, _: u64) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_f32(self, _: f32) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_f64(self, _: f64) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_char(self, v: char) -> Result<(), Error> { self.serialize_str(&v.to_string()) }
-    fn serialize_bytes(self, _: &[u8]) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_none(self) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_some<T: Serialize + ?Sized>(self, v: &T) -> Result<(), Error> { v.serialize(self) }
-    fn serialize_unit(self) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_unit_struct(self, _: &'static str) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_unit_variant(self, _: &'static str, _: u32, v: &'static str) -> Result<(), Error> { self.serialize_str(v) }
-    fn serialize_newtype_struct<T: Serialize + ?Sized>(self, _: &'static str, v: &T) -> Result<(), Error> { v.serialize(self) }
-    fn serialize_newtype_variant<T: Serialize + ?Sized>(self, _: &'static str, _: u32, _: &'static str, _: &T) -> Result<(), Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeTupleStruct, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_tuple_variant(self, _: &'static str, _: u32, _: &'static str, _: usize) -> Result<Self::SerializeTupleVariant, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeStruct, Error> { Err(Error("kaiv: map key must be a string".into())) }
-    fn serialize_struct_variant(self, _: &'static str, _: u32, _: &'static str, _: usize) -> Result<Self::SerializeStructVariant, Error> { Err(Error("kaiv: map key must be a string".into())) }
+    fn serialize_bool(self, _: bool) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_i8(self, _: i8) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_i16(self, _: i16) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_i32(self, _: i32) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_i64(self, _: i64) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_u8(self, _: u8) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_u16(self, _: u16) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_u32(self, _: u32) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_u64(self, _: u64) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_f32(self, _: f32) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_f64(self, _: f64) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_char(self, v: char) -> Result<(), Error> {
+        self.serialize_str(&v.to_string())
+    }
+    fn serialize_bytes(self, _: &[u8]) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_none(self) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_some<T: Serialize + ?Sized>(self, v: &T) -> Result<(), Error> {
+        v.serialize(self)
+    }
+    fn serialize_unit(self) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_unit_struct(self, _: &'static str) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_unit_variant(self, _: &'static str, _: u32, v: &'static str) -> Result<(), Error> {
+        self.serialize_str(v)
+    }
+    fn serialize_newtype_struct<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        v: &T,
+    ) -> Result<(), Error> {
+        v.serialize(self)
+    }
+    fn serialize_newtype_variant<T: Serialize + ?Sized>(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: &T,
+    ) -> Result<(), Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_seq(self, _: Option<usize>) -> Result<Self::SerializeSeq, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_tuple(self, _: usize) -> Result<Self::SerializeTuple, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_tuple_struct(
+        self,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleStruct, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_tuple_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeTupleVariant, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_map(self, _: Option<usize>) -> Result<Self::SerializeMap, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_struct(self, _: &'static str, _: usize) -> Result<Self::SerializeStruct, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
+    fn serialize_struct_variant(
+        self,
+        _: &'static str,
+        _: u32,
+        _: &'static str,
+        _: usize,
+    ) -> Result<Self::SerializeStructVariant, Error> {
+        Err(Error("kaiv: map key must be a string".into()))
+    }
 }
 
 // ------------------------------------------------------ deserializer
@@ -481,10 +564,7 @@ pub fn from_view<'de, T: ::serde::Deserialize<'de>>(view: &View<'_>) -> Result<T
 
 /// Deserialize `T` from a parsed document at a namepath prefix
 /// (`""` for the root, `"/params"`, …).
-pub fn from_doc<'de, T: ::serde::Deserialize<'de>>(
-    doc: &Doc,
-    prefix: &str,
-) -> Result<T, Error> {
+pub fn from_doc<'de, T: ::serde::Deserialize<'de>>(doc: &Doc, prefix: &str) -> Result<T, Error> {
     T::deserialize(De {
         doc,
         prefix: prefix.to_string(),
@@ -516,11 +596,7 @@ impl<'a> De<'a> {
                 }
                 (rest.to_string(), false)
             } else if let Some(rest) = np.strip_prefix(nested_pfx.as_str()) {
-                let seg = rest
-                    .split(['/', ':'])
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let seg = rest.split(['/', ':']).next().unwrap_or("").to_string();
                 if seg.is_empty() {
                     continue;
                 }
@@ -544,17 +620,9 @@ impl<'a> De<'a> {
         let arr = format!("{}/@{f}", self.prefix);
         self.doc.namepaths().any(|np| {
             np == scalar
-                || np.starts_with(nested.as_str())
-                    && np[nested.len()..].starts_with(['/', ':'])
+                || np.starts_with(nested.as_str()) && np[nested.len()..].starts_with(['/', ':'])
                 || np.starts_with(arr.as_str()) && np[arr.len()..].starts_with(['/', ':'])
         })
-    }
-
-    fn field(&self, f: &str) -> De<'a> {
-        De {
-            doc: self.doc,
-            prefix: format!("{}::{f}", self.prefix),
-        }
     }
 
     /// The element positions of the array at `{prefix minus ::f}` —
@@ -615,7 +683,10 @@ impl<'de, 'a> DeTrait<'de> for De<'a> {
         match v {
             "true" => visitor.visit_bool(true),
             "false" => visitor.visit_bool(false),
-            other => Err(Error(format!("kaiv: {} is not a bool: {other}", self.prefix))),
+            other => Err(Error(format!(
+                "kaiv: {} is not a bool: {other}",
+                self.prefix
+            ))),
         }
     }
     fn deserialize_f32<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
@@ -978,18 +1049,120 @@ mod tests {
     }
 
     #[test]
+    fn deserializing_a_missing_required_field_is_an_error() {
+        // The failure mode that matters for a data format: absence
+        // must be reported, not silently defaulted.
+        let daiv = ".!daiv\n!str'/data::id=t3_a1\n";
+        let doc = Doc::parse(daiv).unwrap();
+        let e = from_doc::<Post>(&doc, "/data").unwrap_err();
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn a_value_that_does_not_fit_the_target_type_is_an_error() {
+        // Deserialization is driven by the target type, so a value
+        // the type cannot hold must fail rather than truncate.
+        #[derive(Deserialize, Debug)]
+        struct Small {
+            n: u8,
+        }
+        let doc = Doc::parse(".!daiv\n!int'/d::n=300\n").unwrap();
+        assert!(from_doc::<Small>(&doc, "/d").is_err());
+        let doc = Doc::parse(".!daiv\n!str'/d::n=not-a-number\n").unwrap();
+        assert!(from_doc::<Small>(&doc, "/d").is_err());
+        // In range, it reads back.
+        let doc = Doc::parse(".!daiv\n!int'/d::n=200\n").unwrap();
+        assert_eq!(from_doc::<Small>(&doc, "/d").unwrap().n, 200);
+    }
+
+    #[test]
+    fn null_and_absent_both_read_as_none() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        struct Opt {
+            a: Option<String>,
+            b: Option<String>,
+        }
+        // `a` is explicitly null, `b` is not in the document at all.
+        let doc = Doc::parse(".!daiv\n!null'/d::a=\n").unwrap();
+        let v: Opt = from_doc(&doc, "/d").unwrap();
+        assert_eq!(v, Opt { a: None, b: None });
+    }
+
+    #[test]
+    fn empty_collections_have_no_wire_form_and_come_back_empty() {
+        // An empty array is simply absent in kaiv, which is why
+        // collection fields need `#[serde(default)]` — pin both
+        // halves of that contract.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct Bag {
+            #[serde(default)]
+            items: Vec<String>,
+        }
+        let mut b = DaivBuilder::new();
+        serialize_into(&mut b, "/d", &[], &Bag { items: vec![] }).unwrap();
+        let daiv = b.finish_daiv();
+        assert!(!daiv.contains("items"), "{daiv}");
+        let doc = Doc::parse(&daiv).unwrap();
+        assert_eq!(from_doc::<Bag>(&doc, "/d").unwrap(), Bag { items: vec![] });
+    }
+
+    #[test]
+    fn a_map_key_must_be_a_string() {
+        use std::collections::BTreeMap;
+        let mut b = DaivBuilder::new();
+        let m: BTreeMap<i32, i32> = [(1, 2)].into_iter().collect();
+        assert!(serialize_into(&mut b, "/d", &[], &m).is_err());
+        let mut b = DaivBuilder::new();
+        let m: BTreeMap<String, i32> = [("k".to_string(), 2)].into_iter().collect();
+        serialize_into(&mut b, "/d", &[], &m).unwrap();
+        assert!(b.finish_daiv().contains("!int'/d::k=2\n"));
+    }
+
+    #[test]
+    fn strings_that_cannot_ride_a_flat_line_take_the_embed_channel() {
+        // A leading `$` opens a reference and an embedded newline
+        // ends the line, so neither survives as a plain `!str` —
+        // both must round-trip through `std/enc` instead of
+        // corrupting the document.
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        struct S {
+            v: String,
+        }
+        for raw in ["$not-a-reference", "two\nlines", "trailing\n"] {
+            let mut b = DaivBuilder::new();
+            let value = S { v: raw.to_string() };
+            serialize_into(&mut b, "/d", &[], &value).unwrap();
+            let daiv = b.finish_daiv();
+            let doc = Doc::parse(&daiv).unwrap();
+            assert_eq!(from_doc::<S>(&doc, "/d").unwrap(), value, "{daiv}");
+        }
+    }
+
+    #[test]
     fn typed_round_trip_with_heads() {
         let daiv = emit(&sample());
         // Domain-typed lines, straight from serde.
-        assert!(daiv.contains("!forum/core/flair'/data/@posts/0::flair=acme"), "{daiv}");
-        assert!(daiv.contains("!text'/data/@posts/0::body=<p>one</p>|:|<p>two</p>"), "{daiv}");
+        assert!(
+            daiv.contains("!forum/core/flair'/data/@posts/0::flair=acme"),
+            "{daiv}"
+        );
+        assert!(
+            daiv.contains("!text'/data/@posts/0::body=<p>one</p>|:|<p>two</p>"),
+            "{daiv}"
+        );
         // The single-line body still rides !text (hinted field).
-        assert!(daiv.contains("!text'/data/@posts/1::body=<p>solo</p>"), "{daiv}");
+        assert!(
+            daiv.contains("!text'/data/@posts/1::body=<p>solo</p>"),
+            "{daiv}"
+        );
         assert!(daiv.contains("!null'/data/@posts/1::flair="), "{daiv}");
         assert!(daiv.contains("!bool'/data/@posts/1::locked=true"), "{daiv}");
         assert!(daiv.contains("!float'/data/@posts/0::score=1.5"), "{daiv}");
-        assert!(daiv.contains("!str'/data/@posts/0/@tags::1=repair"), "{daiv}");
-        assert!(daiv.contains("!int'::data/") == false);
+        assert!(
+            daiv.contains("!str'/data/@posts/0/@tags::1=repair"),
+            "{daiv}"
+        );
+        assert!(!daiv.contains("!int'::data/"));
         let doc = Doc::parse(&daiv).unwrap();
         let back: Reply = from_doc(&doc, "/data").unwrap();
         assert_eq!(back, sample());
@@ -1036,8 +1209,7 @@ mod tests {
             "!int'/data/nested::k=7\n",
         );
         let doc = Doc::parse(daiv).unwrap();
-        let v: std::collections::BTreeMap<String, CatchAll> =
-            from_doc(&doc, "/data").unwrap();
+        let v: std::collections::BTreeMap<String, CatchAll> = from_doc(&doc, "/data").unwrap();
         assert!(matches!(v["port"], CatchAll::Int(8443)));
         assert!(matches!(v["on"], CatchAll::Bool(true)));
         assert!(matches!(v["note"], CatchAll::Null));
@@ -1046,6 +1218,9 @@ mod tests {
         assert!(matches!(&v["nested"], CatchAll::Map(m) if matches!(m["k"], CatchAll::Int(7))));
     }
 
+    // A self-describing target: what it deserializes INTO is the
+    // point, so the payloads are inspected via Debug, not read.
+    #[allow(dead_code)]
     #[derive(Deserialize, Debug)]
     #[serde(untagged)]
     enum CatchAll {

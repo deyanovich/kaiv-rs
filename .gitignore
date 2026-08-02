@@ -1,2 +1,7 @@
 /target
-Cargo.lock
+
+# wasm-pack output; the browser bundle is built, never committed.
+/kaiv-wasm/pkg
+
+# Editor/tooling scratch that is not this repo's business.
+.iloc-cache.json

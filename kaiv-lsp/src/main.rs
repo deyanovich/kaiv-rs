@@ -12,9 +12,9 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::{
-    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, PublishDiagnosticsParams, ServerCapabilities,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    PublishDiagnosticsParams, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Uri,
 };
 use std::error::Error;
 
@@ -64,8 +64,7 @@ fn handle_notification(
             }
         }
         DidChangeTextDocument::METHOD => {
-            if let Ok(mut p) = serde_json::from_value::<DidChangeTextDocumentParams>(note.params)
-            {
+            if let Ok(mut p) = serde_json::from_value::<DidChangeTextDocumentParams>(note.params) {
                 // FULL sync: the last change carries the whole text.
                 if let Some(change) = p.content_changes.pop() {
                     publish(connection, p.text_document.uri, &change.text)?;

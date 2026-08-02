@@ -10,10 +10,15 @@ use crate::rex::Regex;
 use crate::table::{Clause, Collection};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// A `.csaiv` parsed into the form the validator scans against.
+/// Build one with [`parse_csaiv`].
+#[derive(Debug, Clone)]
 pub struct CompiledSchema {
+    /// Whether the schema refuses fields it does not declare.
     pub strict: bool,
     /// `.!provenance:LEVEL` requirement, propagated from the header.
     pub provenance: Option<ProvenanceLevel>,
+    /// The declared fields, in schema order.
     pub fields: Vec<SchemaField>,
     /// Level 2 collection constraint lines, checked by Pass 2.
     pub collections: Vec<Collection>,
@@ -41,9 +46,14 @@ pub enum ProvenanceLevel {
     None,
 }
 
+/// One field of a [`CompiledSchema`].
+#[derive(Debug, Clone)]
 pub struct SchemaField {
+    /// The lowered type annotation and constraints.
     pub items: Vec<Item>,
+    /// Fully-qualified namepath the field matches.
     pub namepath: String,
+    /// Declared `?=` — absence is not a required-field error.
     pub optional: bool,
     /// The compile-time-resolved applicable default (often empty).
     /// The Validator never materializes it; it rides the `.csaiv` for
@@ -54,6 +64,7 @@ pub struct SchemaField {
     pub prefix: String,
 }
 
+/// Parse a compiled `.csaiv` schema.
 pub fn parse_csaiv(text: &str) -> Result<CompiledSchema, PipelineError> {
     // Canonical-kind gate: a compiled schema opens with `.!csaiv`
     // (SPEC.md § Format Declaration).
@@ -105,8 +116,10 @@ fn parse_csaiv_inner(text: &str) -> Result<CompiledSchema, PipelineError> {
                         .strip_prefix("[schema::")
                         .and_then(|r| r.strip_suffix(']'))
                     {
-                        delegations
-                            .push((array.to_string(), set.split('|').map(str::to_string).collect()));
+                        delegations.push((
+                            array.to_string(),
+                            set.split('|').map(str::to_string).collect(),
+                        ));
                         continue;
                     }
                     if let Some(header) =
@@ -282,7 +295,7 @@ pub fn schema_for_daiv(
     let mut scoped_hdrs: Vec<(String, bool, Option<ProvenanceLevel>)> = Vec::new();
     for (qualifier, reference) in &refs {
         if reference.starts_with("http://") || reference.starts_with("https://") {
-            return Err(PipelineError::App(AppError::SchemaResolution));
+            return Err(PipelineError::app(AppError::SchemaResolution));
         }
         let bytes = resolver.csaiv_bytes(reference, &layer1)?;
         let text = String::from_utf8(bytes)
@@ -353,12 +366,13 @@ pub fn schema_for_daiv(
             .collect();
         match sel.as_slice() {
             [one] if members.contains(*one) => {}
-            _ => return Err(PipelineError::App(AppError::DelegationSchema)),
+            _ => return Err(PipelineError::app(AppError::DelegationSchema)),
         }
     }
     Ok(Some(schema))
 }
 
+#[derive(Debug)]
 pub(crate) struct DataLine {
     pub(crate) type_name: String,
     pub(crate) unit: Option<String>,
@@ -421,7 +435,11 @@ fn field_ctx(error: AppError, f: &SchemaField, d: &DataLine) -> AppErrorAt {
     if value.len() < d.value.len() {
         value.push('…');
     }
-    let unit = d.unit.as_deref().map(|u| format!(":{u}")).unwrap_or_default();
+    let unit = d
+        .unit
+        .as_deref()
+        .map(|u| format!(":{u}"))
+        .unwrap_or_default();
     let verb = match error {
         AppError::TypeMismatch => "does not satisfy",
         AppError::CollationUnsupported => "needs a collation unavailable in",
@@ -460,6 +478,11 @@ fn scoped_strict(schema: &CompiledSchema, namepath: &str) -> bool {
     scoped_header(schema, namepath).map_or(schema.strict, |h| h.1)
 }
 
+/// Validate a canonical `.daiv` against a compiled schema.
+///
+/// The parallel scan: both sides are in namepath order, so this is
+/// one pass. The first violation is returned with its line and the
+/// field it concerns.
 pub fn validate(daiv: &str, schema: &CompiledSchema) -> Result<(), AppErrorAt> {
     // Canonical-kind gate: the Validator consumes `.daiv` only
     // (SPEC.md § Format Declaration).
@@ -660,7 +683,9 @@ fn check_collections(data: &[DataLine], colls: &[Collection]) -> Result<(), AppE
         }
     }
     for coll in &maps {
-        let Some(pat) = &coll.header.key else { continue };
+        let Some(pat) = &coll.header.key else {
+            continue;
+        };
         let re = Regex::new(pat).ok_or_else(|| {
             at(
                 AppError::ConstraintViolation,
@@ -1088,54 +1113,53 @@ fn check_field(f: &SchemaField, d: &DataLine) -> Result<(), AppError> {
                 let unit_ok = |u: &Option<String>| {
                     u.as_deref().and_then(crate::unit::canonicalize) == data_unit
                 };
-                let matched: Option<&[Constraint]> = if a.type_name == d.type_name
-                    && (a.union.is_empty() || unit_ok(&a.unit))
-                {
-                    Some(&a.constraints)
-                } else if a.type_name == "text" && d.type_name == "str" {
-                    // str→text coercion (SPEC.md § The text Type): a
-                    // plain string satisfies a text field iff the
-                    // coercion is meaning-preserving — a literal
-                    // `|:|` in the value would be silently
-                    // reinterpreted as line breaks, so it collides.
-                    if d.value.contains("|:|") {
-                        return Err(AppError::DelimiterCollision);
-                    }
-                    Some(&a.constraints)
-                } else if a.union.is_empty()
-                    && a.type_name != "str"
-                    && a.type_name != "null"
-                    && d.type_name != "null"
-                    && a.type_name != "text"
-                    && d.type_name != "text"
-                    && !a.type_name.starts_with("std/enc/")
-                    && !d.type_name.starts_with("std/enc/")
-                {
-                    // A retained non-union head (SPEC.md § Head-Type
-                    // Retention) checks STRUCTURALLY, as the same
-                    // field did before retention: the head's
-                    // constraint group governs the value whatever
-                    // the data line's own name says — `!str` (the
-                    // pre-lift authored form, which the schema-aware
-                    // Denormalizer lifts) and a chain-compatible
-                    // name (`!int` under `!std/net/port`) both
-                    // apply. Nominal matching remains where the NAME
-                    // is the semantics: unions (the discriminant),
-                    // `null` (payload-free by type), `text` (the
-                    // `|:|` export interpretation; its one coercion
-                    // is the guarded str→text above), and the
-                    // `std/enc` embed channel (embedded payloads
-                    // never satisfy plain fields, and vice versa)
-                    // — and the explicit identity head `!str`, the
-                    // raw-string declaration, which admits only
-                    // `str`-typed lines.
-                    Some(&a.constraints)
-                } else {
-                    a.union
-                        .iter()
-                        .find(|alt| alt.name == d.type_name && unit_ok(&alt.unit))
-                        .map(|alt| alt.constraints.as_slice())
-                };
+                let matched: Option<&[Constraint]> =
+                    if a.type_name == d.type_name && (a.union.is_empty() || unit_ok(&a.unit)) {
+                        Some(&a.constraints)
+                    } else if a.type_name == "text" && d.type_name == "str" {
+                        // str→text coercion (SPEC.md § The text Type): a
+                        // plain string satisfies a text field iff the
+                        // coercion is meaning-preserving — a literal
+                        // `|:|` in the value would be silently
+                        // reinterpreted as line breaks, so it collides.
+                        if d.value.contains("|:|") {
+                            return Err(AppError::DelimiterCollision);
+                        }
+                        Some(&a.constraints)
+                    } else if a.union.is_empty()
+                        && a.type_name != "str"
+                        && a.type_name != "null"
+                        && d.type_name != "null"
+                        && a.type_name != "text"
+                        && d.type_name != "text"
+                        && !a.type_name.starts_with("std/enc/")
+                        && !d.type_name.starts_with("std/enc/")
+                    {
+                        // A retained non-union head (SPEC.md § Head-Type
+                        // Retention) checks STRUCTURALLY, as the same
+                        // field did before retention: the head's
+                        // constraint group governs the value whatever
+                        // the data line's own name says — `!str` (the
+                        // pre-lift authored form, which the schema-aware
+                        // Denormalizer lifts) and a chain-compatible
+                        // name (`!int` under `!std/net/port`) both
+                        // apply. Nominal matching remains where the NAME
+                        // is the semantics: unions (the discriminant),
+                        // `null` (payload-free by type), `text` (the
+                        // `|:|` export interpretation; its one coercion
+                        // is the guarded str→text above), and the
+                        // `std/enc` embed channel (embedded payloads
+                        // never satisfy plain fields, and vice versa)
+                        // — and the explicit identity head `!str`, the
+                        // raw-string declaration, which admits only
+                        // `str`-typed lines.
+                        Some(&a.constraints)
+                    } else {
+                        a.union
+                            .iter()
+                            .find(|alt| alt.name == d.type_name && unit_ok(&alt.unit))
+                            .map(|alt| alt.constraints.as_slice())
+                    };
                 let Some(cs) = matched else {
                     return Err(AppError::TypeMismatch);
                 };
@@ -1449,8 +1473,7 @@ mod tests {
 
     #[test]
     fn validation_errors_carry_site_context() {
-        let schema =
-            parse_csaiv(".!csaiv a/x\n!int[1,65535]'/server::port=\n").unwrap();
+        let schema = parse_csaiv(".!csaiv a/x\n!int[1,65535]'/server::port=\n").unwrap();
         let err = validate(".!daiv\n!int'/server::port=99999\n", &schema).unwrap_err();
         assert_eq!(err.error, AppError::ConstraintViolation);
         assert_eq!(err.line, 2);
@@ -1498,7 +1521,10 @@ mod tests {
             ..Config::default()
         });
         match schema_for_daiv(&daiv, &r) {
-            Err(PipelineError::App(AppError::RegistryStrict)) => {}
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::RegistryStrict,
+                ..
+            })) => {}
             Err(other) => panic!("expected RegistryStrictError, got {other:?}"),
             Ok(_) => panic!("expected RegistryStrictError, got a schema"),
         }
@@ -1523,7 +1549,10 @@ mod tests {
         // though it is not the first line of the run.
         let bad =
             ".!daiv\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str'/@servers/0::port=1\n";
-        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ProvenanceSchema));
+        assert_eq!(
+            validate(bad, &schema).map_err(|e| e.error),
+            Err(AppError::ProvenanceSchema)
+        );
         // Fully-provenanced element validates.
         let ok = ".!daiv\n!str?s1@20250101T000000Z'/@servers/0::host=a\n!str?s1@20250101T000000Z'/@servers/0::port=1\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
@@ -1532,27 +1561,31 @@ mod tests {
     #[test]
     fn duplicate_element_field_is_a_duplicate_key() {
         let schema =
-            parse_csaiv(".!csaiv a/s\n/^-?[0-9]+$/ ..num[1,65535]'/@servers/::port=\n")
-                .unwrap();
+            parse_csaiv(".!csaiv a/s\n/^-?[0-9]+$/ ..num[1,65535]'/@servers/::port=\n").unwrap();
         // Two ::port lines for element 0 — a repeated schema-defined
         // element key; the out-of-range second value must not slip
         // through unchecked.
         let dup = ".!daiv\n!str'/@servers/0::port=80\n!str'/@servers/0::port=999999\n";
-        assert_eq!(validate(dup, &schema).map_err(|e| e.error), Err(AppError::DuplicateKeySchema));
+        assert_eq!(
+            validate(dup, &schema).map_err(|e| e.error),
+            Err(AppError::DuplicateKeySchema)
+        );
     }
 
     #[test]
     fn quoted_map_key_with_slash_is_matched() {
-        let schema = parse_csaiv(
-            ".!csaiv acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
-        )
-        .unwrap();
+        let schema =
+            parse_csaiv(".!csaiv acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n")
+                .unwrap();
         // A quoted key literally named `a/b` is a flat map entry, not
         // deeper structure — it matches and its value is checked.
         let ok = ".!daiv\n!str'::host=a\n!str'/settings::\"a/b\"=1\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         let bad = ".!daiv\n!str'::host=a\n!str'/settings::\"a/b\"=oops\n";
-        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
+        assert_eq!(
+            validate(bad, &schema).map_err(|e| e.error),
+            Err(AppError::ConstraintViolation)
+        );
     }
 
     /// A resolver whose base lookups all miss on the filesystem —
@@ -1587,9 +1620,8 @@ mod tests {
             b".!csaiv crypto/rsa strict\n!str'::modulus=\n".to_vec(),
         );
         let hdr = ".!daiv\n.!schema:x509/algo\n.!schema:/parameters crypto/rsa\n";
-        let ok = format!(
-            "{hdr}!str'::algorithm=rsa\n!str'::stray=x\n!str'/parameters::modulus=m\n"
-        );
+        let ok =
+            format!("{hdr}!str'::algorithm=rsa\n!str'::stray=x\n!str'/parameters::modulus=m\n");
         let s = schema_for_daiv(&ok, &r).unwrap().unwrap();
         assert_eq!(s.scoped_headers.len(), 1);
         // Root stray tolerated (parent relaxed) …
@@ -1627,13 +1659,9 @@ mod tests {
         .unwrap();
         // Root line without provenance passes (parent imposes none);
         // the member requires a source inside the namespace.
-        let ok = format!(
-            "{hdr}!str'::algorithm=rsa\n!str?lab'/parameters::modulus=m\n"
-        );
+        let ok = format!("{hdr}!str'::algorithm=rsa\n!str?lab'/parameters::modulus=m\n");
         validate(&ok, &s).unwrap();
-        let bad = format!(
-            "{hdr}!str'::algorithm=rsa\n!str'/parameters::modulus=m\n"
-        );
+        let bad = format!("{hdr}!str'::algorithm=rsa\n!str'/parameters::modulus=m\n");
         assert!(matches!(
             validate(&bad, &s).unwrap_err().error,
             AppError::ProvenanceSchema
@@ -1696,7 +1724,10 @@ mod tests {
         let daiv = ".!daiv\n.!schema https://example.org/x.csaiv\n";
         assert!(matches!(
             schema_for_daiv(daiv, &r),
-            Err(PipelineError::App(AppError::SchemaResolution))
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::SchemaResolution,
+                ..
+            }))
         ));
     }
 
@@ -1810,8 +1841,7 @@ mod tests {
         // honors them (primary strength ignores accents), colligo
         // rejects the tag rather than silently collating at the
         // wrong strength.
-        let s2 =
-            parse_csaiv(".!csaiv a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
+        let s2 = parse_csaiv(".!csaiv a/c\n!str {résumé} ..lex[en-u-ks-level1]'::n=\n").unwrap();
         #[cfg(feature = "collation-icu")]
         assert!(validate(".!daiv\n!str'::n=resume\n", &s2).is_ok());
         #[cfg(all(feature = "collation-colligo", not(feature = "collation-icu")))]
@@ -1884,7 +1914,10 @@ mod tests {
         );
         // Ordering of DEFINED fields is still enforced.
         let ooo = ".!daiv\n!str'::b=y\n!str'::a=x\n";
-        assert_eq!(validate(ooo, &schema).map_err(|e| e.error), Err(AppError::RequiredFieldSchema));
+        assert_eq!(
+            validate(ooo, &schema).map_err(|e| e.error),
+            Err(AppError::RequiredFieldSchema)
+        );
     }
 
     #[test]
@@ -2001,10 +2034,9 @@ mod tests {
 
     #[test]
     fn map_entry_scan() {
-        let schema = parse_csaiv(
-            ".!csaiv acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n",
-        )
-        .unwrap();
+        let schema =
+            parse_csaiv(".!csaiv acme/m strict\n!str'::host=\n/^-?[0-9]+$/ ..num'/settings::=\n")
+                .unwrap();
         let ok = ".!daiv\n!str'::host=a\n!str'/settings::x=1\n!str'/settings::y=2\n";
         assert_eq!(validate(ok, &schema).map_err(|e| e.error), Ok(()));
         // Zero entries is a valid map.
@@ -2012,7 +2044,10 @@ mod tests {
         assert_eq!(validate(empty, &schema).map_err(|e| e.error), Ok(()));
         // Entry value must satisfy the value-type constraint.
         let bad = ".!daiv\n!str'::host=a\n!str'/settings::x=oops\n";
-        assert_eq!(validate(bad, &schema).map_err(|e| e.error), Err(AppError::ConstraintViolation));
+        assert_eq!(
+            validate(bad, &schema).map_err(|e| e.error),
+            Err(AppError::ConstraintViolation)
+        );
         // Strict: a non-entry under an unrelated path is still undefined.
         let undef = ".!daiv\n!str'::host=a\n!str'/other::x=1\n";
         assert_eq!(

@@ -18,7 +18,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
-pub use crate::b64::{b64url_decode, b64url_encode};
+pub(crate) use crate::b64::{b64url_decode, b64url_encode};
 
 // ------------------------------------------------------------ JSON parse
 
@@ -705,6 +705,10 @@ pub(crate) fn json_string(s: &str) -> String {
 }
 
 /// Is `s` exactly one JSON number token?
+/// Part of the shared value hub: consumed by the converters that
+/// layer on `json` (yaml, toml, xml, cbor, avro, proto, asn1). A
+/// `json`-only build leaves it idle, which is a valid feature set.
+#[allow(dead_code)]
 pub(crate) fn json_number_ok(s: &str) -> bool {
     let mut p = P { s, i: 0 };
     p.number().is_ok() && p.i == s.len()
@@ -717,6 +721,10 @@ pub(crate) fn json_number_ok(s: &str) -> bool {
 /// hundreds of bare digits and silently turn the token
 /// integer-shaped); fractional values only occur below 2^53, where
 /// `Display` is exact and always carries a point.
+/// Part of the shared value hub: consumed by the converters that
+/// layer on `json` (yaml, toml, xml, cbor, avro, proto, asn1). A
+/// `json`-only build leaves it idle, which is a valid feature set.
+#[allow(dead_code)]
 pub(crate) fn float_token(f: f64) -> String {
     if f.fract() != 0.0 {
         format!("{f}")
@@ -925,6 +933,10 @@ pub fn export_with(
 
 /// The shared resolving tree for the sibling exporters (yaml, toml,
 /// xml, cbor, avro, asn1, proto) — [`tree`]'s type-resolving twin.
+/// Part of the shared value hub: consumed by the converters that
+/// layer on `json` (yaml, toml, xml, cbor, avro, proto, asn1). A
+/// `json`-only build leaves it idle, which is a valid feature set.
+#[allow(dead_code)]
 pub(crate) fn tree_resolved(
     canonical: &str,
     resolver: &crate::resolve::Resolver,
@@ -1035,6 +1047,10 @@ fn tree_inner(canonical: &str, ctx: Option<&ResolveCtx>) -> Result<Node, Pipelin
 /// An export-tree node → `Val`, for non-JSON exporters. Leaf JSON
 /// text (including spliced payloads) parses back into structure;
 /// `Time` becomes a `Typed` scalar.
+/// Part of the shared value hub: consumed by the converters that
+/// layer on `json` (yaml, toml, xml, cbor, avro, proto, asn1). A
+/// `json`-only build leaves it idle, which is a valid feature set.
+#[allow(dead_code)]
 pub(crate) fn node_to_val(node: &Node) -> Result<Val, PipelineError> {
     Ok(match node {
         Node::Leaf(text) => parse_val(text)?,
@@ -1130,6 +1146,15 @@ fn segments(np: &str) -> Result<Vec<Seg>, PipelineError> {
     segs.retain(|s| !s.text.is_empty());
     if segs.is_empty() {
         return Err(err(format!("empty namepath: {np}")));
+    }
+    // `insert` descends one native stack frame per segment, and the
+    // tree it builds is walked by equally recursive emitters — so the
+    // namepath's own length is a nesting bound and gets the same cap
+    // every importer applies to its input.
+    if segs.len() > MAX_DEPTH {
+        return Err(err(format!(
+            "namepath nests deeper than {MAX_DEPTH} segments"
+        )));
     }
     Ok(segs)
 }
@@ -1416,8 +1441,7 @@ mod tests {
         r.preload(
             "acme/gauge",
             "csaiv",
-            b".!csaiv acme/gauge\n!acme/gauge/level /^-?[0-9]+$/ ..num'::level=\n"
-                .to_vec(),
+            b".!csaiv acme/gauge\n!acme/gauge/level /^-?[0-9]+$/ ..num'::level=\n".to_vec(),
         );
         let daiv = ".!daiv\n.!schema:acme/gauge\n!acme/gauge/level'::level=7\n";
         let out = super::export_with(daiv, &r).unwrap();
@@ -1434,7 +1458,11 @@ mod tests {
         assert!(out.contains("\"x\":\"5\""), "{out}");
         // Resolved-numeric head with a non-numeric value: resolution
         // refines, it cannot reject — the string form again.
-        r.preload("acme/n", "taiv", b".!taiv acme/n\n\n!int\n&count=\n".to_vec());
+        r.preload(
+            "acme/n",
+            "taiv",
+            b".!taiv acme/n\n\n!int\n&count=\n".to_vec(),
+        );
         let daiv2 = ".!daiv\n!acme/n/count'::x=not-a-number\n";
         let out2 = super::export_with(daiv2, &r).unwrap();
         assert!(out2.contains("\"x\":\"not-a-number\""), "{out2}");
@@ -1450,8 +1478,8 @@ mod tests {
         }
         assert!(b64url_decode("a").is_none()); // len % 4 == 1
         assert!(b64url_decode("ab=c").is_none()); // padding rejected
-        // Non-canonical trailing bits decode tolerantly (validation is
-        // shape-only, so `aR` flows through the whole pipeline).
+                                                  // Non-canonical trailing bits decode tolerantly (validation is
+                                                  // shape-only, so `aR` flows through the whole pipeline).
         assert_eq!(b64url_decode("aR"), Some(vec![0x69]));
         assert_eq!(b64url_decode("aQ"), Some(vec![0x69]));
     }
@@ -1501,7 +1529,9 @@ mod tests {
         assert!(export(".!kaiv 1\n!str'/@a/0::x=1\n!str'/@a::0=y\n").is_err());
         assert!(export(".!kaiv 1\n!str'/@a::0=y\n!str'/@a/0::x=1\n").is_err());
         // A deeper revisit of an element namespace is legitimate.
-        assert!(export(".!kaiv 1\n!str'/@a/0::x=1\n!str'/@a/1::y=2\n!str'/@a/0/sub::z=3\n").is_ok());
+        assert!(
+            export(".!kaiv 1\n!str'/@a/0::x=1\n!str'/@a/1::y=2\n!str'/@a/0/sub::z=3\n").is_ok()
+        );
     }
 
     #[test]
@@ -1543,7 +1573,10 @@ mod tests {
         let raiv = crate::compile(authored.as_bytes()).unwrap();
         let daiv = crate::denorm::denormalize(&raiv).unwrap();
         assert!(daiv.contains("!text'::basho=old pond|:|a frog jumps in|:|sound of water\n"));
-        assert_eq!(export(&daiv).unwrap().trim_end(), std::str::from_utf8(src).unwrap());
+        assert_eq!(
+            export(&daiv).unwrap().trim_end(),
+            std::str::from_utf8(src).unwrap()
+        );
         // CR-carrying content is not LF-only text: std/enc carries it.
         let cr = import(br#"{"dos":"a\r\nb"}"#).unwrap();
         assert!(!cr.contains("!text"));
@@ -1823,5 +1856,19 @@ mod tests {
         let daiv = crate::denorm::denormalize(&raiv).unwrap();
         let back = export(&daiv).unwrap();
         assert_eq!(back.trim_end().as_bytes(), src.as_slice());
+    }
+
+    #[test]
+    fn an_overdeep_namepath_is_refused_not_recursed() {
+        // `insert` and the emitters descend one frame per segment, so
+        // an unbounded namepath used to overflow the stack — and it
+        // reaches every exporter through the shared tree.
+        let deep: String = "/a".repeat(MAX_DEPTH + 1);
+        let daiv = format!(".!daiv\n!str'{deep}::x=v\n");
+        let e = export(&daiv).unwrap_err();
+        assert!(format!("{e}").contains("nests deeper than"), "{e}");
+        // Just inside the cap still works.
+        let ok: String = "/a".repeat(MAX_DEPTH - 1);
+        assert!(export(&format!(".!daiv\n!str'{ok}::x=v\n")).is_ok());
     }
 }

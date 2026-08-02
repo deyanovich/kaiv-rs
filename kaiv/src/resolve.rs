@@ -1,6 +1,6 @@
 //! Type-library resolution, Layers 1–4 (SPEC.md § Type Registry
 //! Resolution): document-level `.!registry` overrides, then `kaiv.kaiv`
-//! build-time configuration, then — behind the default-on `net`
+//! build-time configuration, then — behind the opt-in `net`
 //! feature — the hosted registries (redirect aliasing + the Layer 4
 //! default hosts). Without `net`, a lookup that would need the network
 //! is a `SchemaResolutionError`. `std/core` is embedded and never
@@ -46,6 +46,7 @@ pub struct ResolutionEvent {
     pub lib: String,
     /// Artifact extension (`taiv`, `faiv`, `saiv`, `csaiv`, `maiv`).
     pub ext: String,
+    /// Which layer supplied the base.
     pub layer: ResolutionLayer,
     /// The matched base (URL or filesystem path; empty for `Preload`).
     pub base: String,
@@ -53,9 +54,16 @@ pub struct ResolutionEvent {
     pub location: String,
 }
 
-#[derive(Default)]
+/// Resolves type and unit libraries through the layer cascade,
+/// caching every artifact it reads.
+///
+/// The configuration is fixed at construction: the caches below are
+/// keyed on resolutions the configuration already decided, so a
+/// configuration swapped in mid-flight would be silently ignored for
+/// everything already resolved. Build a new resolver instead.
+#[derive(Debug, Default)]
 pub struct Resolver {
-    pub config: Config,
+    config: Config,
     cache: RefCell<HashMap<String, TypeLib>>,
     unit_cache: RefCell<HashMap<String, UnitLib>>,
     /// Preloaded artifact bytes, `(lib, ext)` → bytes; consulted
@@ -72,6 +80,7 @@ pub struct Resolver {
 }
 
 impl Resolver {
+    /// A resolver over `config`.
     pub fn new(config: Config) -> Self {
         Resolver {
             config,
@@ -82,6 +91,11 @@ impl Resolver {
     /// Core-only resolver: no configuration, only embedded `std/core`.
     pub fn offline() -> Self {
         Self::default()
+    }
+
+    /// The configuration this resolver was built with.
+    pub fn config(&self) -> &Config {
+        &self.config
     }
 
     /// Supply `{lib}.{ext}` bytes ahead of resolution. Preloaded
@@ -148,7 +162,7 @@ impl Resolver {
         } else {
             self.cache.borrow()[lib].types.get(name).cloned()
         };
-        cloned.ok_or(PipelineError::App(AppError::SchemaResolution))
+        cloned.ok_or(PipelineError::app(AppError::SchemaResolution))
     }
 
     fn load(&self, lib: &str, layer1: &[(String, String)]) -> Result<TypeLib, PipelineError> {
@@ -156,7 +170,7 @@ impl Resolver {
         let parsed = parse_taiv(&bytes)?;
         if parsed.library != lib {
             // The file's .!taiv identity must match the requested path.
-            return Err(PipelineError::App(AppError::SchemaResolution));
+            return Err(PipelineError::app(AppError::SchemaResolution));
         }
         Ok(parsed)
     }
@@ -173,7 +187,7 @@ impl Resolver {
             let parsed = parse_faiv(&bytes)?;
             if parsed.library != lib {
                 // The file's .!faiv identity must match the path.
-                return Err(PipelineError::App(AppError::SchemaResolution));
+                return Err(PipelineError::app(AppError::SchemaResolution));
             }
             self.unit_cache.borrow_mut().insert(lib.to_string(), parsed);
         }
@@ -322,10 +336,18 @@ impl Resolver {
         layer1: &[(String, String)],
         ext: &str,
     ) -> Result<Vec<u8>, PipelineError> {
+        // The library path becomes a path component under the selected
+        // base and a path segment of a URL, so it must be a library
+        // path and nothing else: an absolute operand would otherwise
+        // replace the base outright (`PathBuf::push`) and read from
+        // wherever the document points.
+        if !valid_library_path(lib) {
+            return Err(PipelineError::app(AppError::SchemaResolution));
+        }
         let prefix = lib.split('/').next().unwrap_or(lib);
         let (base, layer) = self
             .select_base(prefix, layer1, ext)
-            .ok_or(PipelineError::App(AppError::SchemaResolution))?;
+            .ok_or(PipelineError::app(AppError::SchemaResolution))?;
         let mut event = ResolutionEvent {
             lib: lib.to_string(),
             ext: ext.to_string(),
@@ -338,7 +360,7 @@ impl Resolver {
             // contract comes from. Record the would-be resolution and
             // refuse before any read or fetch.
             self.events.borrow_mut().push(event);
-            return Err(PipelineError::App(AppError::RegistryStrict));
+            return Err(PipelineError::app(AppError::RegistryStrict));
         }
         if base.starts_with("http://") || base.starts_with("https://") {
             #[cfg(feature = "net")]
@@ -359,7 +381,7 @@ impl Resolver {
             #[cfg(not(feature = "net"))]
             {
                 let _ = event;
-                return Err(PipelineError::App(AppError::SchemaResolution));
+                return Err(PipelineError::app(AppError::SchemaResolution));
             }
         }
         let mut path = PathBuf::from(base);
@@ -370,11 +392,33 @@ impl Resolver {
         }
         path.push(format!("{lib}.{ext}"));
         let bytes =
-            std::fs::read(&path).map_err(|_| PipelineError::App(AppError::SchemaResolution))?;
+            std::fs::read(&path).map_err(|_| PipelineError::app(AppError::SchemaResolution))?;
         event.location = path.display().to_string();
         self.events.borrow_mut().push(event);
         Ok(bytes)
     }
+}
+
+/// The spec's `library-path` (SPEC.md § Grammar): `lib-seg0
+/// *( "/" path-seg )`, where `lib-seg0` is alpha-first and each
+/// `path-seg` starts alphanumeric, both continuing over
+/// alphanumerics, `_` and `-`. Excludes `.`, so neither `..` nor an
+/// absolute or drive-qualified path can pass.
+fn valid_library_path(lib: &str) -> bool {
+    let mut segs = lib.split('/');
+    let Some(first) = segs.next() else {
+        return false;
+    };
+    let seg_ok = |s: &str, alpha_first: bool| {
+        let mut cs = s.chars();
+        let head_ok = match cs.next() {
+            Some(c) if alpha_first => c.is_ascii_alphabetic(),
+            Some(c) => c.is_ascii_alphanumeric(),
+            None => false,
+        };
+        head_ok && cs.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    };
+    seg_ok(first, true) && segs.all(|s| seg_ok(s, false))
 }
 
 /// Layer 4 default registry hosts, by artifact kind (SPEC.md
@@ -397,7 +441,7 @@ fn layer4_default(ext: &str) -> Option<&'static str> {
 /// imports, in declaration order: `std/core` first (short canonical
 /// form), then each import. Found in none → `SchemaResolutionError`;
 /// found in several → ambiguity error.
-pub fn resolve_named(
+pub(crate) fn resolve_named(
     name: &str,
     imports: &[String],
     resolver: &Resolver,
@@ -419,13 +463,14 @@ pub fn resolve_named(
     }
     match found {
         Some(lib) => Ok(format!("{lib}/{name}")),
-        None => Err(PipelineError::App(AppError::SchemaResolution)),
+        None => Err(PipelineError::app(AppError::SchemaResolution)),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::AppErrorAt;
 
     const ACME_NET: &[u8] = b".!taiv acme/net\n\n{tcp,udp}\n&proto=tcp\n";
 
@@ -447,6 +492,56 @@ mod tests {
         std::fs::create_dir_all(dir.join("acme")).unwrap();
         std::fs::write(dir.join("acme/net.taiv"), ACME_NET).unwrap();
         dir
+    }
+
+    #[test]
+    fn library_paths_are_confined_to_the_base() {
+        // The operand of `.!types` / `.!units` reaches resolution
+        // verbatim, and `PathBuf::push` with an absolute component
+        // replaces the base outright — so an unvalidated library path
+        // reads whatever the document names.
+        let outside =
+            std::env::temp_dir().join(format!("kaiv-resolve-escape-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("net.taiv"), ACME_NET).unwrap();
+
+        let base = temp_lib("confine");
+        let mut config = Config::default();
+        config
+            .registries
+            .insert("default".into(), base.display().to_string());
+        let r = Resolver::new(config);
+
+        let escape = format!("{}/net", outside.display());
+        assert!(r.contains(&escape, "proto", &[]).is_err());
+        // Nothing outside the base was read.
+        assert!(r.take_resolutions().is_empty());
+        // The legitimate path under the same base still resolves.
+        assert!(r.contains("acme/net", "proto", &[]).unwrap());
+
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn library_path_grammar() {
+        for ok in ["std", "std/core", "acme/server-config", "a/b0/c_d"] {
+            assert!(valid_library_path(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "/abs/path",
+            "../etc/passwd",
+            "a/../b",
+            "a/",
+            "0lib",  // lib-seg0 is alpha-first
+            "a/b.c", // "." reserved for DNS authority
+            "C:/win",
+            "a//b",
+        ] {
+            assert!(!valid_library_path(bad), "{bad}");
+        }
     }
 
     #[test]
@@ -488,7 +583,10 @@ mod tests {
         // refusal came before any read.
         let layer1 = vec![("acme".to_string(), "/nonexistent/kaiv-test".to_string())];
         match r.contains("acme/net", "proto", &layer1) {
-            Err(PipelineError::App(AppError::RegistryStrict)) => {}
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::RegistryStrict,
+                ..
+            })) => {}
             other => panic!("expected RegistryStrictError, got {other:?}"),
         }
         let events = r.take_resolutions();

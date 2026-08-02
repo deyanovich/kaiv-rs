@@ -24,7 +24,8 @@ fn patterns_in_dialect(items: &[Item]) -> bool {
     fn constraint_ok(c: &Constraint) -> bool {
         match c {
             Constraint::Pattern(b) => crate::rex::Regex::new(b).is_some(),
-            Constraint::Span(s) => match s.strip_prefix("..lex[").and_then(|r| r.strip_suffix(']')) {
+            Constraint::Span(s) => match s.strip_prefix("..lex[").and_then(|r| r.strip_suffix(']'))
+            {
                 Some(tag) => crate::bcp47::well_formed(tag),
                 None => true,
             },
@@ -49,6 +50,8 @@ pub fn compile_schema(input: &[u8]) -> Result<String, PipelineError> {
     compile_schema_with(input, &Resolver::offline())
 }
 
+/// [`compile_schema`] with a resolver for `.!schema` inheritance and
+/// `.!types` imports.
 pub fn compile_schema_with(input: &[u8], resolver: &Resolver) -> Result<String, PipelineError> {
     compile_schema_chain(input, resolver, &mut Vec::new())
 }
@@ -164,10 +167,7 @@ fn compile_schema_chain(
                     // an explicit non-1 version (1.x etc.) is
                     // preserved verbatim.
                     let mut toks = rest.split_ascii_whitespace().peekable();
-                    if toks
-                        .peek()
-                        .is_some_and(|t| crate::lexer::is_version_one(t))
-                    {
+                    if toks.peek().is_some_and(|t| crate::lexer::is_version_one(t)) {
                         toks.next();
                     }
                     let mut header = String::from(".!csaiv");
@@ -215,7 +215,7 @@ fn compile_schema_chain(
             }
             LineKind::Meta(s) => {
                 if ns_blocks.last().is_some_and(|b| b.delegated) {
-                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                    return Err(PipelineError::app(AppError::SchemaDelegation));
                 }
                 if s.starts_with('!') {
                     let a = parse_annotation(s)
@@ -295,7 +295,7 @@ fn compile_schema_chain(
                     return Err(map_block_member_error(line.no));
                 }
                 if ns_blocks.last().is_some_and(|b| b.delegated) {
-                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                    return Err(PipelineError::app(AppError::SchemaDelegation));
                 }
                 // A `schema:` clause declares a discriminated schema
                 // set (SPEC.md § Namespace-Scoped Schemas, D-10): the
@@ -323,14 +323,11 @@ fn compile_schema_chain(
                 if let Some(members) = &deleg {
                     // The path plus exactly one schema: token; an
                     // empty or duplicate member is rejected.
-                    if toks.len() != 2
-                        || members.iter().any(|m| m.is_empty())
-                        || {
-                            let mut seen = std::collections::BTreeSet::new();
-                            !members.iter().all(|m| seen.insert(m.as_str()))
-                        }
-                    {
-                        return Err(PipelineError::App(AppError::SchemaDelegation));
+                    if toks.len() != 2 || members.iter().any(|m| m.is_empty()) || {
+                        let mut seen = std::collections::BTreeSet::new();
+                        !members.iter().all(|m| seen.insert(m.as_str()))
+                    } {
+                        return Err(PipelineError::app(AppError::SchemaDelegation));
                     }
                     let mut np = String::new();
                     for s0 in ns_prefix.iter().chain(segs.iter()) {
@@ -381,7 +378,7 @@ fn compile_schema_chain(
                     return Err(map_block_member_error(line.no));
                 }
                 if ns_blocks.last().is_some_and(|b| b.delegated) {
-                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                    return Err(PipelineError::app(AppError::SchemaDelegation));
                 }
                 if let Some(b) = ns_blocks.last_mut() {
                     b.content_seen = true;
@@ -426,7 +423,7 @@ fn compile_schema_chain(
                 // (D-10); its compiled presence is the delegation
                 // line alone.
                 if ns_blocks.last().is_some_and(|b| b.delegated) {
-                    return Err(PipelineError::App(AppError::SchemaDelegation));
+                    return Err(PipelineError::app(AppError::SchemaDelegation));
                 }
                 // A lowered map block admits nothing after its key
                 // line; in particular a literal key line (a required
@@ -468,9 +465,7 @@ fn compile_schema_chain(
                         // The key grammar and the value items must sit
                         // inside the pinned regex dialect, like every
                         // other compiled pattern.
-                        if crate::rex::Regex::new(&pat).is_none()
-                            || !patterns_in_dialect(&parsed)
-                        {
+                        if crate::rex::Regex::new(&pat).is_none() || !patterns_in_dialect(&parsed) {
                             return Err(PipelineError::Lex(crate::error::LexErrorAt {
                                 error: crate::error::LexError::InvalidConstraint,
                                 line: line.no,
@@ -549,8 +544,7 @@ fn compile_schema_chain(
                     // rather than silently drop them.
                     if a.unit.is_some() || !a.constraints.is_empty() {
                         return Err(PipelineError::Other(
-                            "a map annotation admits neither a unit nor inline constraints"
-                                .into(),
+                            "a map annotation admits neither a unit nor inline constraints".into(),
                         ));
                     }
                     let va = Annotation {
@@ -601,7 +595,7 @@ fn compile_schema_chain(
                     && !namepath.ends_with("::")
                     && !admits_null(&parsed)
                 {
-                    return Err(PipelineError::App(AppError::SchemaOptionalWithoutDefault));
+                    return Err(PipelineError::app(AppError::SchemaOptionalWithoutDefault));
                 }
                 let default = resolved.unwrap_or("");
                 check_dup(&inherited, &mut local_keys, &namepath)?;
@@ -636,7 +630,7 @@ fn compile_schema_chain(
                 | Some(crate::validator::ProvenanceLevel::Source)
         ) && compiled.fields.iter().any(|f| f.optional)
         {
-            return Err(PipelineError::App(AppError::ProvenanceSchema));
+            return Err(PipelineError::app(AppError::ProvenanceSchema));
         }
     }
     Ok(s)
@@ -685,7 +679,7 @@ fn check_dup(
     key: &str,
 ) -> Result<(), PipelineError> {
     if !inherited.contains_key(key) && !local_keys.insert(key.to_string()) {
-        return Err(PipelineError::App(AppError::SchemaDuplicateKey));
+        return Err(PipelineError::app(AppError::SchemaDuplicateKey));
     }
     Ok(())
 }
@@ -743,7 +737,7 @@ fn inherit(
     // A `.!schema` chain that revisits a schema already being
     // compiled is a cycle (SPEC.md § Errors).
     if chain.iter().any(|r| r == reference) {
-        return Err(PipelineError::App(AppError::SchemaInheritanceCycle));
+        return Err(PipelineError::app(AppError::SchemaInheritanceCycle));
     }
     if chain.len() >= MAX_INHERIT_DEPTH {
         return Err(PipelineError::Other("schema inheritance too deep".into()));
@@ -751,7 +745,7 @@ fn inherit(
     if reference.starts_with("http://") || reference.starts_with("https://") {
         // URL references are network resolution — unimplemented
         // offline, like http(s) registry bases.
-        return Err(PipelineError::App(AppError::SchemaResolution));
+        return Err(PipelineError::app(AppError::SchemaResolution));
     }
     let bytes = resolver.schema_bytes(reference, layer1)?;
     chain.push(reference.to_string());
@@ -973,6 +967,7 @@ fn lower_with_defaults(
 /// is. Distinct from validation: kinds are derived, best-effort
 /// interpretation for FOREIGN formats — kaiv itself needs none of
 /// this.
+#[cfg(feature = "json")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExportKind {
     Num,
@@ -985,6 +980,7 @@ pub(crate) enum ExportKind {
 /// a `..num` span means numeric, a lowered `{true,false}` enum means
 /// boolean. Unresolvable names are `Other` — exporters fall back to
 /// the string form rather than failing.
+#[cfg(feature = "json")]
 pub(crate) fn resolved_kind(
     name: &str,
     resolver: &Resolver,
@@ -999,7 +995,10 @@ pub(crate) fn resolved_kind(
     if bucket_annotation(&a, resolver, layer1, &mut b, &mut col, 0).is_err() {
         return ExportKind::Other;
     }
-    if b.spans.iter().any(|s| s == "..num" || s.starts_with("..num")) {
+    if b.spans
+        .iter()
+        .any(|s| s == "..num" || s.starts_with("..num"))
+    {
         ExportKind::Num
     } else if b.ranges.iter().any(|r| r == "{true,false}") {
         ExportKind::Bool
@@ -1014,6 +1013,7 @@ pub(crate) fn resolved_kind(
 /// constraints (`..num` span, `{true,false}` enum). The offline
 /// fallback for exporters — a device holding the `.csaiv` for
 /// validation already holds the base kinds.
+#[cfg(feature = "json")]
 pub(crate) fn field_export_kind(items: &[Item]) -> ExportKind {
     for i in items {
         match i {
@@ -1022,9 +1022,7 @@ pub(crate) fn field_export_kind(items: &[Item]) -> ExportKind {
                 "bool" => return ExportKind::Bool,
                 _ => {}
             },
-            Item::Constraint(Constraint::Span(sp))
-                if sp == "..num" || sp.starts_with("..num") =>
-            {
+            Item::Constraint(Constraint::Span(sp)) if sp == "..num" || sp.starts_with("..num") => {
                 return ExportKind::Num;
             }
             Item::Constraint(Constraint::Enum(vs))
@@ -1068,9 +1066,8 @@ pub(crate) fn render_union_alt(
                     "unit annotation on a non-numeric union alternative: {name}:{u}"
                 )));
             }
-            let cu = crate::unit::canonicalize(u).ok_or_else(|| {
-                PipelineError::Other(format!("invalid unit expression: {u}"))
-            })?;
+            let cu = crate::unit::canonicalize(u)
+                .ok_or_else(|| PipelineError::Other(format!("invalid unit expression: {u}")))?;
             format!("{name}:{cu}")
         }
         None => name.to_string(),
@@ -1292,18 +1289,13 @@ mod tests {
     fn strict_provenance_levels_reject_optional_fields() {
         // Materialized lines carry no provenance, so required/source
         // plus an optional field can never validate — reject statically.
-        assert!(compile_schema(
-            b".!saiv a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n"
-        )
-        .is_err());
-        assert!(compile_schema(
-            b".!saiv a/p\n.!provenance:source\n!str\ntimeout?=5\n"
-        )
-        .is_err());
-        // Required-only fields, or the none level, are fine.
         assert!(
-            compile_schema(b".!saiv a/p\n.!provenance:required\n!str\nhost=\n").is_ok()
+            compile_schema(b".!saiv a/p\n.!provenance:required\n!str\nhost=\ntimeout?=5\n")
+                .is_err()
         );
+        assert!(compile_schema(b".!saiv a/p\n.!provenance:source\n!str\ntimeout?=5\n").is_err());
+        // Required-only fields, or the none level, are fine.
+        assert!(compile_schema(b".!saiv a/p\n.!provenance:required\n!str\nhost=\n").is_ok());
         assert!(compile_schema(b".!saiv a/p\n.!provenance:none\n!str\ntimeout?=5\n").is_ok());
     }
 
@@ -1356,9 +1348,7 @@ mod tests {
         // A literal key line inside a map block — a required named
         // entry — is outside the D-2 scope: clear compile error.
         assert_eq!(
-            compile_schema(
-                b".!saiv a/m\n(/name min=1)\n!str\n/^[a-z]+$/=\ntimeout=30\n()\n"
-            ),
+            compile_schema(b".!saiv a/m\n(/name min=1)\n!str\n/^[a-z]+$/=\ntimeout=30\n()\n"),
             ic(5)
         );
         // Bounds on a block that never declares its key grammar.
@@ -1401,11 +1391,9 @@ mod tests {
             assert!(compile_schema(saiv.as_bytes()).is_ok(), "{ok}");
         }
         // The same check covers `.taiv` publish-time validation.
-        assert!(check_type_lib(
-            b".!taiv acme/l\n\n/^.+$/ ..lex[123]\n&name=\n",
-            &dead_end()
-        )
-        .is_err());
+        assert!(
+            check_type_lib(b".!taiv acme/l\n\n/^.+$/ ..lex[123]\n&name=\n", &dead_end()).is_err()
+        );
     }
 
     #[test]
@@ -1519,10 +1507,9 @@ mod tests {
         // Anonymous refinement (SPEC.md § Anonymous Refinement):
         // the .taiv definition shape above a field — implicit str,
         // lowered to a bare constraint group like !str + items.
-        let csaiv = compile_schema(
-            b".!saiv a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n",
-        )
-        .unwrap();
+        let csaiv =
+            compile_schema(b".!saiv a/c\n/^[a-z]+$/ #[1,8]\nname=\n..lex [aa,mm]\nbucket=\n")
+                .unwrap();
         assert_eq!(
             csaiv,
             ".!csaiv a/c\n/^[a-z]+$/ #[1,8]'::name=\n..lex [aa,mm]'::bucket=\n"
@@ -1543,7 +1530,7 @@ mod tests {
     fn duplicate_schema_field_is_an_error() {
         assert_eq!(
             compile_schema(b".!saiv a/d\nhost=\nhost=\n"),
-            Err(PipelineError::App(AppError::SchemaDuplicateKey))
+            Err(PipelineError::app(AppError::SchemaDuplicateKey))
         );
     }
 
@@ -1554,7 +1541,7 @@ mod tests {
         let saiv = b".!saiv acme/x\n.!schema https://example.org/base.saiv\n";
         assert_eq!(
             compile_schema(saiv),
-            Err(PipelineError::App(AppError::SchemaResolution))
+            Err(PipelineError::app(AppError::SchemaResolution))
         );
     }
 

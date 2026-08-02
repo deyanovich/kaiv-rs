@@ -60,6 +60,7 @@ pub struct DaivBuilder {
 }
 
 impl DaivBuilder {
+    /// An empty builder.
     pub fn new() -> Self {
         Self::default()
     }
@@ -137,7 +138,7 @@ impl DaivBuilder {
         self.leaf_with_unit(namepath, type_name, None, value, prov)
     }
 
-    /// Like [`leaf`], with a unit annotation on the type
+    /// Like [`DaivBuilder::leaf`], with a unit annotation on the type
     /// (`!float:W'...`). The unit must be a well-formed unit
     /// expression (canonicalizable grammar; membership is the
     /// emitting tool's concern, as with type names).
@@ -320,6 +321,7 @@ pub struct KaivBuilder {
 }
 
 impl KaivBuilder {
+    /// An empty builder.
     pub fn new() -> Self {
         Self::default()
     }
@@ -444,7 +446,8 @@ fn check_namepath(namepath: &str) -> Result<(), PipelineError> {
     // metadata delimiter so `namepath` is validated exactly as a
     // canonical key — the language `lex(_, FileKind::Data)` on finish()
     // output must accept.
-    if crate::lexer::check_key(&format!("!x'{namepath}"), 0, crate::lexer::FileKind::Data).is_err() {
+    if crate::lexer::check_key(&format!("!x'{namepath}"), 0, crate::lexer::FileKind::Data).is_err()
+    {
         return bad("is not a valid canonical namepath");
     }
     // check_key silently strips a trailing `:`/`+`/`;` as an
@@ -594,7 +597,7 @@ mod tests {
         assert!(b.leaf("::a b", "str", "x", None).is_err()); // space
         assert!(b.leaf("::café", "str", "x", None).is_err()); // non-ascii
         assert!(b.leaf("::a:", "str", "x", None).is_err()); // trailing op sigil
-        // idents: prov-ident forbids '.' and a leading '-'
+                                                            // idents: prov-ident forbids '.' and a leading '-'
         assert!(b.declare_source("row.17", "u").is_err());
         assert!(b.declare_source("-lead", "u").is_err());
         // values

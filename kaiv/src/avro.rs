@@ -241,6 +241,7 @@ fn name_of(v: Option<&Val>) -> Result<String, PipelineError> {
 
 // -------------------------------------------------------------- import
 
+/// Convert an Avro OCF document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let mut r = R { b: input, i: 0 };
     if r.take(4)? != MAGIC {
@@ -478,13 +479,14 @@ fn bin(bytes: Vec<u8>) -> Val {
 
 // --------------------------------------------------------------- export
 
+/// Convert a canonical `.raiv` / `.daiv` to an Avro OCF file.
 pub fn export(canonical: &str) -> Result<Vec<u8>, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,
@@ -1188,6 +1190,11 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 // -------------------------------------------------------------- inflate
 
+/// The most a single compressed block may expand to. DEFLATE reaches
+/// roughly 1000:1, so without a ceiling a few kilobytes of crafted
+/// input decompress to gigabytes.
+const MAX_INFLATE_OUT: usize = 64 * 1024 * 1024;
+
 /// Raw DEFLATE (RFC 1951) decompression — the Avro `deflate` codec
 /// has no zlib wrapper and no checksum. Decode-only: export always
 /// writes the null codec.
@@ -1226,6 +1233,14 @@ struct Inf<'a> {
 }
 
 impl Inf<'_> {
+    /// Refuse before growing the output past [`MAX_INFLATE_OUT`].
+    fn room(&self, n: usize) -> Result<(), PipelineError> {
+        if self.out.len() + n > MAX_INFLATE_OUT {
+            return Err(err("DEFLATE block decompresses beyond the size limit"));
+        }
+        Ok(())
+    }
+
     /// `n` bits, LSB first.
     fn bits(&mut self, n: u32) -> Result<u32, PipelineError> {
         let mut v = 0u32;
@@ -1262,6 +1277,7 @@ impl Inf<'_> {
         if end > self.b.len() {
             return Err(err("truncated DEFLATE stream"));
         }
+        self.room(end - self.pos)?;
         self.out.extend_from_slice(&self.b[self.pos..end]);
         self.pos = end;
         Ok(())
@@ -1341,7 +1357,10 @@ impl Inf<'_> {
         loop {
             let sym = self.decode(lit)?;
             match sym {
-                0..=255 => self.out.push(sym as u8),
+                0..=255 => {
+                    self.room(1)?;
+                    self.out.push(sym as u8);
+                }
                 256 => return Ok(()),
                 257..=285 => {
                     let i = (sym - 257) as usize;
@@ -1354,6 +1373,7 @@ impl Inf<'_> {
                     if d > self.out.len() {
                         return Err(err("DEFLATE distance reaches before the output start"));
                     }
+                    self.room(len)?;
                     let start = self.out.len() - d;
                     for j in 0..len {
                         let byte = self.out[start + j];
@@ -2031,6 +2051,44 @@ mod tests {
         assert_eq!(inflate(&deflated).unwrap(), payload);
         assert!(inflate(&[0x07]).is_err()); // block type 3
         assert!(inflate(&[0x01, 0x03, 0x00, 0x00, 0x00, b'a']).is_err()); // bad nlen
+    }
+
+    #[test]
+    fn inflate_refuses_a_decompression_bomb() {
+        // A fixed-Huffman block of maximum-length back-references:
+        // 13 bits in, 258 bytes out — ~159:1, so a few hundred
+        // kilobytes would expand to gigabytes unbounded.
+        let mut out: Vec<u8> = Vec::new();
+        let (mut acc, mut nbits) = (0u32, 0u32);
+        let put = |v: u32, n: u32, out: &mut Vec<u8>, acc: &mut u32, nbits: &mut u32| {
+            for i in 0..n {
+                *acc |= ((v >> i) & 1) << *nbits;
+                *nbits += 1;
+                if *nbits == 8 {
+                    out.push(*acc as u8);
+                    *acc = 0;
+                    *nbits = 0;
+                }
+            }
+        };
+        // Huffman codes pack MSB-first; the raw fields LSB-first.
+        let msb =
+            |code: u32, n: u32| (0..n).fold(0u32, |a, i| a | (((code >> (n - 1 - i)) & 1) << i));
+        put(1, 1, &mut out, &mut acc, &mut nbits); // BFINAL
+        put(1, 2, &mut out, &mut acc, &mut nbits); // BTYPE = fixed
+        put(msb(0x30 + 97, 8), 8, &mut out, &mut acc, &mut nbits); // literal 'a'
+                                                                   // Enough (len 258, dist 1) matches to pass the ceiling.
+        for _ in 0..(MAX_INFLATE_OUT / 258 + 2) {
+            put(msb(0xc5, 8), 8, &mut out, &mut acc, &mut nbits); // length sym 285
+            put(msb(0, 5), 5, &mut out, &mut acc, &mut nbits); // distance sym 0
+        }
+        put(msb(0, 7), 7, &mut out, &mut acc, &mut nbits); // end of block
+        if nbits > 0 {
+            out.push(acc as u8);
+        }
+        assert!(out.len() < 1024 * 1024, "input must stay small");
+        let e = inflate(&out).unwrap_err();
+        assert!(e.to_string().contains("size limit"), "{e}");
     }
 
     #[test]

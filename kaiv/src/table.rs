@@ -425,10 +425,7 @@ mod tests {
         let h = parse_compiled("[key::/^[a-z][a-z0-9_]*$/] [max=100]").unwrap();
         assert_eq!(h.key.as_deref(), Some("^[a-z][a-z0-9_]*$"));
         assert_eq!(h.max, Some(100));
-        assert_eq!(
-            render_compiled(&h),
-            "[key::/^[a-z][a-z0-9_]*$/] [max=100]"
-        );
+        assert_eq!(render_compiled(&h), "[key::/^[a-z][a-z0-9_]*$/] [max=100]");
         let h = parse_compiled("[key::/^(a b|c)$/] [min=1]").unwrap();
         assert_eq!(h.key.as_deref(), Some("^(a b|c)$"));
         assert_eq!(parse_compiled(&render_compiled(&h)).unwrap(), h);

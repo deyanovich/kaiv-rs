@@ -20,6 +20,7 @@ use std::collections::BTreeMap;
 
 /// A parsed canonical document: the data lines of one `.daiv`
 /// stream, in document order, addressable by namepath.
+#[derive(Debug)]
 pub struct Doc {
     lines: Vec<DataLine>,
 }
@@ -43,6 +44,7 @@ impl Doc {
     /// The scalar line at exactly `namepath`:
     /// `(type_name, value)`. Crate-internal — the serde
     /// deserializer's primitive.
+    #[cfg(feature = "serde")]
     pub(crate) fn line_at(&self, namepath: &str) -> Option<(&str, &str)> {
         self.lines
             .iter()
@@ -51,6 +53,7 @@ impl Doc {
     }
 
     /// Every data line's namepath, in document order.
+    #[cfg(feature = "serde")]
     pub(crate) fn namepaths(&self) -> impl Iterator<Item = &str> {
         self.lines.iter().map(|l| l.namepath.as_str())
     }
@@ -76,10 +79,11 @@ pub struct Typed<'d> {
 }
 
 /// The document scoped to a namepath prefix. The root view's prefix
-/// is empty; [`View::element`]s and [`View::view`]s extend it.
+/// is empty; [`elements`](View::elements) and [`view`](View::view)
+/// extend it.
 /// Lookup paths are relative: `::field` for a scalar at this level,
 /// `/sub::field` below a struct, `@arr` for a nested scalar array.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct View<'d> {
     doc: &'d Doc,
     prefix: String,
@@ -93,10 +97,14 @@ impl<'d> View<'d> {
     /// The typed value at `path`, if the line exists.
     pub fn typed(&self, path: &str) -> Option<Typed<'d>> {
         let want = self.abs(path);
-        self.doc.lines.iter().find(|l| l.namepath == want).map(|l| Typed {
-            type_name: &l.type_name,
-            value: &l.value,
-        })
+        self.doc
+            .lines
+            .iter()
+            .find(|l| l.namepath == want)
+            .map(|l| Typed {
+                type_name: &l.type_name,
+                value: &l.value,
+            })
     }
 
     /// The raw value at `path`. A `!null` line yields `None` — use
@@ -184,10 +192,12 @@ impl<'d> View<'d> {
         Some((enc, crate::b64::b64url_decode(t.value)?))
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn doc(&self) -> &'d Doc {
         self.doc
     }
 
+    #[cfg(feature = "serde")]
     pub(crate) fn prefix(&self) -> &str {
         &self.prefix
     }
@@ -207,6 +217,7 @@ impl<'d> View<'d> {
 /// fields (`::field` at that view's level), so nested structs and
 /// array elements decode by delegating to sub-views.
 pub trait FromDaiv: Sized {
+    /// Read `Self` out of the document under `view`.
     fn from_daiv(view: &View<'_>) -> Result<Self, PipelineError>;
 }
 
@@ -277,7 +288,10 @@ mod tests {
         b.leaf_embed("::attachment", "html", b"<p>|:|</p>", None)
             .unwrap();
         let out = b.finish();
-        assert!(out.contains("!text'::body=<p>line one</p>|:|<p>line two</p>\n"), "{out}");
+        assert!(
+            out.contains("!text'::body=<p>line one</p>|:|<p>line two</p>\n"),
+            "{out}"
+        );
         assert!(out.contains("!std/enc/html'::attachment="), "{out}");
         // The canonical form reads back losslessly.
         let doc = Doc::parse(&b.finish_daiv()).unwrap();

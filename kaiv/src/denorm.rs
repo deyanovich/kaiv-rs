@@ -175,8 +175,7 @@ pub(crate) fn materialize(
             // element, materializing absent optional element fields.
             let arr = arr.to_string();
             let mut gend = si;
-            while gend < fields.len()
-                && ns_arr_parts(&fields[gend]).is_some_and(|(a, _)| a == arr)
+            while gend < fields.len() && ns_arr_parts(&fields[gend]).is_some_and(|(a, _)| a == arr)
             {
                 gend += 1;
             }
@@ -314,11 +313,15 @@ fn emit_matched(
         if let Some(rest) = body.strip_prefix("!str") {
             if rest.starts_with(['\'', '?']) {
                 if head == "!text" {
-                    if let Some(eq) = rest.find('\'').and_then(|t| {
-                        crate::validator::first_eq(&rest[t + 1..]).map(|e| t + 1 + e)
-                    }) {
-                        if rest[eq + 1..].trim_end_matches(['\n', '\r']).contains("|:|") {
-                            return Err(PipelineError::App(AppError::DelimiterCollision));
+                    if let Some(eq) = rest
+                        .find('\'')
+                        .and_then(|t| crate::validator::first_eq(&rest[t + 1..]).map(|e| t + 1 + e))
+                    {
+                        if rest[eq + 1..]
+                            .trim_end_matches(['\n', '\r'])
+                            .contains("|:|")
+                        {
+                            return Err(PipelineError::app(AppError::DelimiterCollision));
                         }
                     }
                 }
@@ -403,7 +406,7 @@ fn convert_line<'l>(
         crate::unit::Convert::Converted(nv) => nv,
         crate::unit::Convert::NotConvertible => return None,
         crate::unit::Convert::Inexact => {
-            return Some(Err(PipelineError::App(AppError::UnitConversion)))
+            return Some(Err(PipelineError::app(AppError::UnitConversion)))
         }
     };
     // The converted value must still satisfy the field's type — a
@@ -415,7 +418,7 @@ fn convert_line<'l>(
                 .map(|re| re.is_match(&nv))
                 .unwrap_or(false);
             if !ok {
-                return Some(Err(PipelineError::App(AppError::UnitConversion)));
+                return Some(Err(PipelineError::app(AppError::UnitConversion)));
             }
         }
     }
@@ -440,11 +443,7 @@ fn convert_line<'l>(
 fn field_head(f: &SchemaField) -> Option<String> {
     f.items.iter().find_map(|i| match i {
         crate::anno::Item::Anno(a) if a.union.is_empty() => {
-            let unit = a
-                .unit
-                .as_ref()
-                .map(|u| format!(":{u}"))
-                .unwrap_or_default();
+            let unit = a.unit.as_ref().map(|u| format!(":{u}")).unwrap_or_default();
             Some(format!("!{}{unit}", a.type_name))
         }
         _ => None,
@@ -467,7 +466,7 @@ fn emit_absent_element(
         return Ok(());
     }
     if !g.optional {
-        return Err(PipelineError::App(AppError::RequiredFieldSchema));
+        return Err(PipelineError::app(AppError::RequiredFieldSchema));
     }
     let (ty, value) = materialized_parts(g)?;
     ensure_eol(out, eol);
@@ -501,7 +500,7 @@ fn emit_absent(
         return Ok(());
     }
     if !f.optional {
-        return Err(PipelineError::App(AppError::RequiredFieldSchema));
+        return Err(PipelineError::app(AppError::RequiredFieldSchema));
     }
     let (ty, value) = materialized_parts(f)?;
     ensure_eol(out, eol);
@@ -530,24 +529,24 @@ fn materialized_parts(f: &SchemaField) -> Result<(String, String), PipelineError
                 // is itself invalid (SchemaOptionalWithoutDefaultError
                 // at schema-compile time); a stale artifact surfaces
                 // here at build time.
-                .ok_or(PipelineError::App(AppError::SchemaOptionalWithoutDefault))?;
-            let value = if name == "null" { "" } else { f.default.as_str() };
+                .ok_or(PipelineError::app(AppError::SchemaOptionalWithoutDefault))?;
+            let value = if name == "null" {
+                ""
+            } else {
+                f.default.as_str()
+            };
             Ok((format!("!{name}"), value.to_string()))
         }
         Some(a) => {
             if !crate::validator::default_applicable(&f.items, &f.default) {
-                return Err(PipelineError::App(AppError::SchemaOptionalWithoutDefault));
+                return Err(PipelineError::app(AppError::SchemaOptionalWithoutDefault));
             }
-            let unit = a
-                .unit
-                .as_ref()
-                .map(|u| format!(":{u}"))
-                .unwrap_or_default();
+            let unit = a.unit.as_ref().map(|u| format!(":{u}")).unwrap_or_default();
             Ok((format!("!{}{unit}", a.type_name), f.default.clone()))
         }
         None => {
             if !crate::validator::default_applicable(&f.items, &f.default) {
-                return Err(PipelineError::App(AppError::SchemaOptionalWithoutDefault));
+                return Err(PipelineError::app(AppError::SchemaOptionalWithoutDefault));
             }
             Ok(("!str".to_string(), f.default.clone()))
         }
@@ -583,10 +582,7 @@ fn namepath_of(line: &str) -> Option<String> {
 
 /// Inline every `$namepath` field reference from the table and
 /// collapse `$$` → `$`, scanning the whole value.
-fn resolve_value(
-    value: &str,
-    table: &HashMap<String, String>,
-) -> Result<String, PipelineError> {
+fn resolve_value(value: &str, table: &HashMap<String, String>) -> Result<String, PipelineError> {
     let b = value.as_bytes();
     let mut out = String::with_capacity(value.len());
     let mut i = 0;
@@ -617,13 +613,13 @@ fn resolve_value(
                 let end = start + fieldref_len(&b[start..]);
                 if end == start {
                     // Lone `$` in a `.raiv` value.
-                    return Err(PipelineError::App(AppError::UndefinedReference));
+                    return Err(PipelineError::app(AppError::UndefinedReference));
                 }
                 let target = canonical_ref(&value[start..end]);
                 let v = table
                     .get(&target)
                     // Forward or dangling field reference.
-                    .ok_or(PipelineError::App(AppError::UndefinedReference))?;
+                    .ok_or(PipelineError::app(AppError::UndefinedReference))?;
                 out.push_str(v);
                 i = end;
             }
@@ -677,6 +673,7 @@ fn canonical_ref(r: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::AppErrorAt;
 
     #[test]
     fn commented_out_line_does_not_define_reference() {
@@ -686,7 +683,10 @@ mod tests {
         let r = denormalize(".!raiv\n#!int'::port=8080\n!int'::port_backup=$port\n");
         assert!(matches!(
             r,
-            Err(PipelineError::App(AppError::UndefinedReference))
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::UndefinedReference,
+                ..
+            }))
         ));
     }
 
@@ -703,13 +703,18 @@ mod tests {
         assert!(daiv.contains("!text'::basho=old pond\n"));
         // Explicit !text passes through untouched.
         let raiv2 = ".!raiv\n.!schema:acme/notes\n!text'::basho=a|:|b\n";
-        assert!(denormalize_with(raiv2, &r).unwrap().contains("!text'::basho=a|:|b\n"));
+        assert!(denormalize_with(raiv2, &r)
+            .unwrap()
+            .contains("!text'::basho=a|:|b\n"));
         // A str value carrying a literal `|:|` cannot be coerced —
         // the retype would reinterpret it as line breaks.
         let raiv3 = ".!raiv\n.!schema:acme/notes\n!str'::basho=a|:|b\n";
         assert!(matches!(
             denormalize_with(raiv3, &r),
-            Err(PipelineError::App(AppError::DelimiterCollision))
+            Err(PipelineError::App(AppErrorAt {
+                error: AppError::DelimiterCollision,
+                ..
+            }))
         ));
     }
 
@@ -728,7 +733,8 @@ mod tests {
             "!int /^-?[0-9]+$/ ..num'::retries?=3\n",
         );
         r.preload("acme/gauge", "csaiv", csaiv.as_bytes().to_vec());
-        let raiv = ".!raiv\n.!schema:acme/gauge\n!str'::level=2\n!str'::armed=true\n!str'::port=8443\n";
+        let raiv =
+            ".!raiv\n.!schema:acme/gauge\n!str'::level=2\n!str'::armed=true\n!str'::port=8443\n";
         let daiv = denormalize_with(raiv, &r).unwrap();
         assert!(daiv.contains("!int'::level=2\n"), "{daiv}");
         assert!(daiv.contains("!bool'::armed=true\n"), "{daiv}");
@@ -768,9 +774,6 @@ mod tests {
     #[test]
     fn fieldref_len_admits_array_element_reference() {
         // `@servers/0::name` is one field-reference token.
-        assert_eq!(
-            fieldref_len(b"@servers/0::name"),
-            "@servers/0::name".len()
-        );
+        assert_eq!(fieldref_len(b"@servers/0::name"), "@servers/0::name".len());
     }
 }

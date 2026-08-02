@@ -3,9 +3,9 @@ name = "kaiv"
 # 0.2.0: complete rewrite. 0.1.0 was the Era 1 "kv format" CLI tool;
 # this is the library-only reference implementation of the current
 # kaiv format (Levels 0-2), with the CLI split into `kaiv-cli`.
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
-rust-version = "1.84.0"
+rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/kaiv-format/kaiv-rs"
 authors = ["Bojan Đuričković"]
@@ -19,9 +19,9 @@ documentation = "https://docs.rs/kaiv"
 # sibling; it is a development artifact, not part of the package.
 exclude = ["tests"]
 
-# Not --all-features: the two collation backends are mutually
-# exclusive, so docs build with everything except colligo (the ICU
-# default already provides the `collate` module docs).
+# Everything except colligo: with both backends enabled ICU wins, so
+# naming colligo here would only add an unreachable dependency.
+# Feature badges come from rustdoc's doc_auto_cfg, stable since 1.92.
 [package.metadata.docs.rs]
 features = [
     "serde",
@@ -40,10 +40,11 @@ features = [
 ]
 
 [features]
-# Layer 3/4 network resolution. On by default; disable (
-# default-features = false) for embedded/offline builds — the core
-# pipeline itself has no dependencies.
-default = ["net", "collation-icu"]
+# The default is Level 0-3 over the local filesystem. `net` is NOT in
+# it: a parsing library should not reach the network unless asked, and
+# it carries the whole TLS stack. Enable it for Layer 3/4 registry
+# resolution (the `kaiv` CLI does).
+default = ["collation-icu"]
 net = ["dep:ureq"]
 json = []
 serde = ["dep:serde"]
@@ -59,19 +60,16 @@ xsd = ["xml"]
 # Level 3 locale-aware collation (`..lex[locale]`) via ICU4X. On by
 # default; the embedded CLDR data grows the binary, so disable
 # (default-features = false) for a lean Level 0-2 runtime.
-# Level 3 backends — mutually exclusive (enforced by a
-# compile_error in lib.rs; cargo features cannot declare
-# exclusion). `collation-icu` is the default: full CLDR 48
+# Level 3 backends. `collation-icu` is the default: full CLDR 48
 # fidelity via ICU4X, every locale and `-u-` override the spec
 # recognizes. `collation-colligo` is the lightweight alternative
 # (wasm-friendly, exact context-free tiers only, honest rejection
-# elsewhere). With neither, `..lex[locale]` rejects and only the
+# elsewhere). Enabling both is legal and resolves to ICU — features
+# are additive, so unrelated crates in one graph must be able to pick
+# independently. With neither, `..lex[locale]` rejects and only the
 # built-in byte order remains.
 collation-icu = ["dep:icu_collator", "dep:icu_locale", "dep:icu_locale_core"]
 collation-colligo = ["dep:colligo"]
-# The 0.3/0.4 feature spelling, kept as an alias for the default
-# backend.
-collation = ["collation-icu"]
 
 [dependencies]
 serde = { version = "1", optional = true, default-features = false, features = ["std"] }
@@ -79,9 +77,9 @@ icu_collator = { version = "~2.1", optional = true }
 icu_locale = { version = "~2.1", optional = true }
 icu_locale_core = { version = "~2.1", optional = true }
 colligo = { version = "0.1.1", default-features = false, features = ["embedded-data"], optional = true }
-# `~` pins the minor line: the ICU4X 2.1 line embeds CLDR 48 data
-# (the spec's pinned reference version, SPEC.md § Reference
-# Collation) and is the last line within rust-version 1.84.
+# `~` pins the minor line: the ICU4X 2.1 line embeds CLDR 48 data —
+# the spec's pinned reference version (SPEC.md § Reference
+# Collation), so the pin is a correctness constraint, not caution.
 toml = { version = "1.1.2", features = ["preserve_order"], optional = true }
 ureq = { version = "3.3", optional = true, default-features = false, features = ["rustls"] }
 yaml-rust2 = { version = "0.11.0", optional = true }

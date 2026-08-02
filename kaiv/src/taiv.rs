@@ -10,6 +10,7 @@ use crate::lexer::{lex, FileKind, LineKind};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
+/// A parsed `.taiv` type library.
 #[derive(Debug, Clone)]
 pub struct TypeLib {
     /// Library path from `.!taiv` (e.g. `std/core`, `acme/net`).
@@ -19,8 +20,11 @@ pub struct TypeLib {
     pub types: BTreeMap<String, TypeDef>,
 }
 
+/// One type definition, still symbolic: base-type and `&name`
+/// references are resolved when the schema compiler lowers it.
 #[derive(Debug, Clone, Default)]
 pub struct TypeDef {
+    /// The definition's annotation and constraint items.
     pub items: Vec<Item>,
     /// The type's default value — the `&name=` line's right side. A
     /// kaiv value is never absent, only empty; the empty string is
@@ -28,6 +32,7 @@ pub struct TypeDef {
     pub default: String,
 }
 
+/// Parse a `.taiv` type library.
 pub fn parse_taiv(input: &[u8]) -> Result<TypeLib, PipelineError> {
     let lines = lex(input, FileKind::TypeLib).map_err(PipelineError::Lex)?;
     let mut library = String::new();
@@ -227,11 +232,21 @@ mod net_math_tests {
             assert!(accepts("std/net", "url", v), "url must accept {v}");
         }
         // Authority-less URIs: uri yes, url no.
-        for v in ["mailto:ada@example.com", "urn:isbn:0451450523", "tel:+1-816-555-1212"] {
+        for v in [
+            "mailto:ada@example.com",
+            "urn:isbn:0451450523",
+            "tel:+1-816-555-1212",
+        ] {
             assert!(accepts("std/net", "uri", v), "uri must accept {v}");
             assert!(!accepts("std/net", "url", v), "url must reject {v}");
         }
-        for v in ["", "no scheme", "1http://x/", "http://ex%2/", "http://ex.com/ space"] {
+        for v in [
+            "",
+            "no scheme",
+            "1http://x/",
+            "http://ex%2/",
+            "http://ex.com/ space",
+        ] {
             assert!(!accepts("std/net", "uri", v), "uri must reject {v}");
         }
     }
@@ -246,18 +261,36 @@ mod net_math_tests {
         ] {
             assert!(accepts("std/net", "email", v), "email must accept {v}");
         }
-        for v in ["ada@", "@example.com", "a@-bad.com", "a@bad-.com", "a b@c.d", "ada"] {
+        for v in [
+            "ada@",
+            "@example.com",
+            "a@-bad.com",
+            "a@bad-.com",
+            "a b@c.d",
+            "ada",
+        ] {
             assert!(!accepts("std/net", "email", v), "email must reject {v}");
         }
     }
 
     #[test]
     fn hostname_is_rfc_1123() {
-        for v in ["example.com", "a", "sub-1.ex-ample.org", "xn--nxasmq6b.example"] {
-            assert!(accepts("std/net", "hostname", v), "hostname must accept {v}");
+        for v in [
+            "example.com",
+            "a",
+            "sub-1.ex-ample.org",
+            "xn--nxasmq6b.example",
+        ] {
+            assert!(
+                accepts("std/net", "hostname", v),
+                "hostname must accept {v}"
+            );
         }
         for v in ["-bad.com", "bad-.com", "ex..com", "", "a_b.com"] {
-            assert!(!accepts("std/net", "hostname", v), "hostname must reject {v}");
+            assert!(
+                !accepts("std/net", "hostname", v),
+                "hostname must reject {v}"
+            );
         }
         // 63-octet label passes; 64 fails.
         assert!(accepts("std/net", "hostname", &"a".repeat(63)));
@@ -276,13 +309,26 @@ mod net_math_tests {
 
     #[test]
     fn complex_is_a_plus_bi() {
-        for v in ["3+2i", "0+0i", "-1.5-0.5i", "3+0i", "0-1e3i", "1e-2+2.5e10i", "3.14+2i"] {
+        for v in [
+            "3+2i",
+            "0+0i",
+            "-1.5-0.5i",
+            "3+0i",
+            "0-1e3i",
+            "1e-2+2.5e10i",
+            "3.14+2i",
+        ] {
             assert!(accepts("std/math", "complex", v), "complex must accept {v}");
         }
         // One spelling: no bare reals, no lone i, no spaces, no
         // double sign, i suffix mandatory.
-        for v in ["3", "2i", "i", "3 + 2i", "3+-2i", "3+2j", "3+2", "+2i", "3i+2"] {
-            assert!(!accepts("std/math", "complex", v), "complex must reject {v}");
+        for v in [
+            "3", "2i", "i", "3 + 2i", "3+-2i", "3+2j", "3+2", "+2i", "3i+2",
+        ] {
+            assert!(
+                !accepts("std/math", "complex", v),
+                "complex must reject {v}"
+            );
         }
     }
 }

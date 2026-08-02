@@ -8,7 +8,7 @@
 //!
 //! The spec pins CLDR 48 as the conformance reference; this
 //! implementation embeds exactly that (the ICU4X 2.1 line's data)
-//! and reports it as [`CLDR_VERSION`] — the conformance metadata
+//! and reports it as [`crate::collate::CLDR_VERSION`] — the conformance metadata
 //! SPEC.md § Reference Collation calls for.
 
 use std::cell::RefCell;
@@ -72,9 +72,7 @@ fn build(tag: &str) -> Option<CollatorBorrowed<'static>> {
     // A well-formed tag whose language has no CLDR entry would reach
     // root only by fallback — reject it; `und` is the explicit,
     // legal spelling for root collation.
-    if locale.id.language != icu_locale_core::subtags::Language::UNKNOWN
-        && !cldr_covers(&locale)
-    {
+    if locale.id.language != icu_locale_core::subtags::Language::UNKNOWN && !cldr_covers(&locale) {
         return None;
     }
     let mut options = CollatorOptions::default();

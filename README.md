@@ -17,11 +17,8 @@ Rust. A cargo workspace with four crates:
   by the editor plugins in the sibling `editors` and `kaiv-vim`
   repos; install with `cargo install --path kaiv-lsp`.
 - **`kaiv-wasm`** — the browser playground entry point behind
-  the sibling `demo` repo (demo.kaiv.io). Not in the default
-  build set: its `collation-colligo` choice cannot co-build with
-  the CLI's ICU default (the backends are mutually exclusive);
-  build it standalone via wasm-pack or `cargo build -p
-  kaiv-wasm`.
+  the sibling `demo` repo (demo.kaiv.io). Built for the browser
+  via wasm-pack, or `cargo build -p kaiv-wasm`.
 
 kaiv is an immutable structural type system for data at rest; the
 specification and design documents live in the sibling `spec`
@@ -42,6 +39,28 @@ kaiv build    <file.kaiv>       authored -> .daiv (compile + denorm)
 kaiv schema   <file.saiv>       authored schema -> compiled (.csaiv)
 kaiv validate <data> <schema>   .daiv/.kaiv against .csaiv/.saiv -> pass/error
 kaiv unit     <expr>            canonicalize a unit expression
+kaiv fmt      [file] [--check]  format an authoring file into the standard
+                                style, in place (stdin prints to stdout);
+                                --check exits 1 if it is not already
+                                formatted. Canonical .daiv/.raiv have
+                                exactly one spelling, so fmt refuses them
+                                and points at unbuild
+kaiv unbuild  [file]            canonical .daiv/.raiv -> authored .kaiv,
+                                build's inverse direction. A view, not a
+                                round trip: sugar the compiler resolved
+                                away (comments, variables, references) does
+                                not come back; .raiv preserves more,
+                                authored units included
+kaiv mapping  validate <m.maiv> check a mapping against its two schemas
+                                (namepaths, overrides, required-field
+                                completeness)
+kaiv mapping  apply <m> [data]  source document -> target .daiv
+kaiv mapping  compose <a> <b>   compose two mappings (a: B<-A, b: C<-B)
+                                into C<-A; the .!via trail records each hop
+kaiv login    [email]           sign in to the kaiv registries (idaiv): an
+                                emailed one-time link approves this device
+kaiv whoami                     the signed-in account
+kaiv logout                     revoke and forget the stored session
 kaiv infer    [--name ID] [f]   infer an authored .saiv from an example
                                 document (kaiv or any import format); the
                                 example validates against the result
@@ -85,10 +104,16 @@ otherwise; output on stdout, diagnostics on stderr.
 |---|---|
 | `lexer` | Six-rule line classifier + document checks (SPEC.md § Parsing Requirements). Eager model: whole text validated before any token is emitted. |
 | `anno` | Constraint grammar, both surface forms (annotation position and constraint-line position), including the alternative-delimiter pattern form `re{sep}…{sep}` (lowered to canonical `/…/`). |
-| `rex` | Backtracking matcher for the pinned finite-state regex dialect. |
-| `unit` | Compound-unit canonicalization (base-name-sorted factors) and built-in-set membership. |
+| `unit` | Compound-unit canonicalization (base-name-sorted factors), built-in-set membership, and exact same-dimension conversion. |
+| `error` | The spec's error catalog: `LexError` / `AppError` and their positioned forms, each `name()` the exact string the conformance vectors pin. |
+| `builder` | `DaivBuilder` / `KaivBuilder`: emit canonical or authored kaiv programmatically, without going through text. |
+| `doc` | Reader over a parsed `.daiv`: `Doc::parse`, then `View` lookups by relative namepath (`::field`, `/ns`, `/@arr`), plus the `FromDaiv` trait. |
+| `fmt` | `format_data` / `format_plain` (authored files into the standard style) and `unbuild` (canonical back to authored — the inverse direction of build, not a round trip). |
+| `maiv` | `.maiv` mappings: parse, static publish-time validation against source and target schemas, application, and composition. |
+| `serde` (feature `serde`) | kaiv as a serde data format: `Serialize` straight to canonical lines, `Deserialize` back out of a `Doc` view. |
+| `collate` (features `collation-icu` / `collation-colligo`) | Level 3 locale-aware collation behind one backend or the other. |
 | `taiv` / `faiv` | Type-library (`.taiv`) and unit-definition (`.faiv`) parsing; `std/core` and `std/enc` ship embedded as real `.taiv` files. |
-| `config` / `resolve` / `net` | `kaiv.kaiv` Layer 2 configuration (the format bootstrap) and Layer 1–4 registry resolution: filesystem bases, and — behind the default-on `net` feature — `http(s)` fetching with redirect aliasing, Layer 4 default hosts, and an immutable on-disk cache. |
+| `config` / `resolve` / `net` | `kaiv.kaiv` Layer 2 configuration (the format bootstrap) and Layer 1–4 registry resolution: filesystem bases, and — behind the opt-in `net` feature — `http(s)` fetching with redirect aliasing, Layer 4 default hosts, and an immutable on-disk cache. |
 | `compiler` | `.kaiv` → `.raiv`: variables, sugar (`+=`, `;=`, `:=`, `+:=`, blocks, maps), `&name` resolution via `.!types`, unit membership via `.!units`. |
 | `denorm` | `.raiv` → `.daiv`: `$field` reference resolution, nothing else. |
 | `schema` | `.saiv` → `.csaiv`: transitive named-type lowering, constrained-union groups, map entry lines and keyed map blocks (lowered to the `[key::…]` collection clause + entry-count bounds), `;=` vector declarations and `[/@name …]` element blocks with Level 2 table headers (unique/ref/min/max collection constraint lines), `.!schema` inheritance (flat, `/ns`-encapsulated, `/@arr` element-wise; redeclaration narrows in place), `=`/`?=` operators, strict-modifier passthrough. |
@@ -123,9 +148,33 @@ zero tests, silently indistinguishable from success, so a
 sentinel test trips with a directive instead (per-package CI
 should run the workspace root, or `cargo test -p kaiv --features
 json,yaml,toml,xml,cbor,avro,proto,asn1,graphql,xsd`). Library-
-only iteration: `cargo test -p kaiv --lib`. Note that
-`--all-features` does not build — it would enable both mutually
-exclusive collation backends.
+only iteration: `cargo test -p kaiv --lib`.
+
+## Stability
+
+The crate is pre-1.0 and follows Cargo's pre-1.0 semver reading: a
+breaking change bumps the minor version. `kaiv` and `kaiv-cli`
+version together; `kaiv-lsp` tracks its own line.
+
+The public API is everything reachable from the crate root on
+[docs.rs](https://docs.rs/kaiv). Anything not reachable from there
+is an implementation detail and may change in a patch release.
+
+The error enums (`LexError`, `AppError`, `PipelineError`) are
+`#[non_exhaustive]`: match them with a wildcard arm. The catalog is
+complete against the current spec, but Level 4 is unimplemented and
+will add to it.
+
+**MSRV: Rust 1.85** for the library, the CLI and the LSP; raising it
+is a minor-version change, and CI builds against it. The optional
+`collation-colligo` backend needs 1.88 (its dependency uses let
+chains), so `kaiv-wasm`, the only crate that selects it, declares
+that instead.
+
+Feature notes: `default = ["collation-icu"]`. `net` is opt-in — the
+library does no network I/O unless you ask for it. The two collation
+backends are additive; with both enabled ICU wins, so unrelated
+crates in one dependency graph can each pick one.
 
 ## Scope and known limits (seed)
 
@@ -134,23 +183,22 @@ layers: `.!registry` (Layer 1) and `kaiv.kaiv` (Layer 2) over
 filesystem or `http(s)` bases, redirect aliasing (Layer 3), and the
 canonical default hosts `t.kaiv.io`/`s.kaiv.io`/`f.kaiv.io`
 (Layer 4; the `k*aiv.com` production domains take over when those
-zones go live). Network
-resolution is the `net` feature — on by default, disabled via
-`default-features = false` for embedded/offline builds, where an
-`http(s)` base is a `SchemaResolutionError`. Fetched artifacts are
+zones go live). Network resolution is the `net` feature — opt-in,
+so a default build makes no outbound request and an `http(s)` base
+is a `SchemaResolutionError`; the CLI enables it. Fetched artifacts are
 immutable eternalinks, cached without revalidation under
 `~/.cache/kaiv` (`KAIV_CACHE_DIR` / `/cache::dir` in `kaiv.kaiv`
 override); `KAIV_OFFLINE=1` or `kaiv --offline` resolves from the
 cache only. Level 3 locale collation (`..lex[locale]`) has
-two mutually exclusive backends: `collation-icu` — on by default,
+two backends: `collation-icu` — on by default,
 full-fidelity ICU4X, every locale and `-u-` override the spec
 recognizes (the CLDR data grows the binary by roughly 1.3 MB) —
 and the opt-in `collation-colligo`, a lightweight context-free
 backend ([colligo](https://crates.io/crates/colligo), ~100 KB)
 that serves its exactly-reproducible locales and honestly rejects
 the rest (`fr-CA`, `ja`, `-u-` extensions →
-`CollationUnsupportedError`). Enabling both is a compile error;
-`collation` remains an alias for `collation-icu`. With neither
+`CollationUnsupportedError`). Enabling both resolves to ICU. With
+neither
 (`default-features = false`) you get a lean Level 0–2 runtime
 where `..lex[locale]` is a `CollationUnsupportedError` and only
 the built-in byte order remains — never a silent byte-order

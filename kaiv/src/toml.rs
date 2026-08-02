@@ -19,6 +19,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert a TOML document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let text = std::str::from_utf8(input).map_err(|_| err("input is not valid UTF-8"))?;
     let table: ::toml::Table = text
@@ -72,13 +73,14 @@ fn flavor(d: &::toml::value::Datetime) -> &'static str {
     }
 }
 
+/// Convert a canonical `.raiv` / `.daiv` to TOML.
 pub fn export(canonical: &str) -> Result<String, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,
@@ -292,5 +294,17 @@ mod tests {
         let daiv = crate::denorm::denormalize(&raiv).unwrap();
         let json = crate::json::export(&daiv).unwrap();
         assert_eq!(json.trim_end(), r#"{"when":"2026-07-03T21:00:00Z"}"#);
+    }
+
+    #[test]
+    fn deep_nesting_is_rejected_not_recursed() {
+        // As in the YAML pair: `to_val` recurses without a counter of
+        // its own, so the TOML parser's depth limit is what keeps
+        // untrusted input off the stack. Pin it.
+        let mut s = String::from("a = ");
+        s.push_str(&"[".repeat(50_000));
+        s.push_str(&"]".repeat(50_000));
+        s.push('\n');
+        assert!(import(s.as_bytes()).is_err());
     }
 }

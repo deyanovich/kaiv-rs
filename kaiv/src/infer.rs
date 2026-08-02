@@ -42,6 +42,11 @@ enum Entry {
     Skipped(String),
 }
 
+/// Infer an authored `.saiv` from a canonical document.
+///
+/// The result describes the sample: types come from the annotations
+/// already on the lines, and every field is required. It is a
+/// starting point to edit, not a contract.
 pub fn infer(canonical: &str, name: &str) -> Result<String, PipelineError> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut index: BTreeMap<String, usize> = BTreeMap::new(); // path → entries idx

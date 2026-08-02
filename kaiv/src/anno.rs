@@ -3,8 +3,10 @@
 //! the whitespace-free annotation position (`!int[1,65535]:s?prov`) and
 //! the space-separated constraint-line position (`/re/ ..num [1,65535]`).
 
+/// The `std/core` type names, which resolve without an import.
 pub const CORE_TYPES: &[&str] = &["int", "float", "bool", "null", "b64", "text", "str", "map"];
 
+/// One constraint clause of an annotation or constraint line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Constraint {
     /// `/regex/` — body verbatim (with `\/` passed through).
@@ -25,13 +27,18 @@ pub enum Constraint {
 /// (`int(/^-?[0-9]+$/..num[1,3600])`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UnionAlt {
+    /// The alternative's type name.
     pub name: String,
+    /// Constraints textually following it.
     pub constraints: Vec<Constraint>,
     /// The alternative's unit (D-11): a unit rides the alternative
     /// it follows, never the union.
     pub unit: Option<String>,
 }
 
+/// A parsed type annotation: the head type, any union
+/// alternatives, and the constraints, unit and provenance
+/// riding them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Annotation {
     /// `int`, `str`, `std/net/port`, `map`, …
@@ -461,6 +468,7 @@ pub enum Item {
     Anno(Box<Annotation>),
     /// `&name` base reference (same-library named type).
     Named(String),
+    /// A bare constraint clause, as written on a constraint line.
     Constraint(Constraint),
 }
 

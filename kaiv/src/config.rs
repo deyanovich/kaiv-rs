@@ -8,6 +8,9 @@ use crate::error::PipelineError;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Build-time resolution configuration: the Layer 2 registry map
+/// and the resolution-mode switches. Load one from a `kaiv.kaiv`
+/// file with [`Config::load`].
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     /// Registry prefix → base (URL or filesystem path). The reserved

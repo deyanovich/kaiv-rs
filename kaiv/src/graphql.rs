@@ -28,6 +28,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert a GraphQL SDL type to an authored `.saiv`.
 pub fn import_schema(
     input: &[u8],
     type_name: Option<&str>,

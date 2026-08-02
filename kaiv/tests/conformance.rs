@@ -12,6 +12,26 @@ fn conformance_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/kaiv/conformance")
 }
 
+/// The conformance tree lives in the spec repo, not this one, so a
+/// clone without it as a sibling cannot run these tests. Say that
+/// once and plainly — six `read_dir` panics naming a path that was
+/// never going to exist explain nothing.
+fn require_conformance_dir() -> PathBuf {
+    let d = conformance_dir();
+    if d.is_dir() {
+        return d;
+    }
+    panic!(
+        "conformance vectors not found at {}\n\n\
+         The tree lives in the spec repo, which these tests expect as a\n\
+         sibling checkout:\n\n    \
+         <parent>/spec/kaiv/conformance\n    \
+         <parent>/kaiv-rs      (this repo)\n\n\
+         Point KAIV_CONFORMANCE_DIR at it if it lives elsewhere.",
+        d.display()
+    )
+}
+
 /// A vector directory may carry its own `kaiv.kaiv` (plus a local
 /// registry tree) — the offline Layer 1/2 resolution surface. This is
 /// also the config-bootstrap test: the harness parses the config with
@@ -85,7 +105,10 @@ fn gate(dir: &Path) -> Gate {
 #[test]
 fn all_conformance_categories_are_known() {
     let known = ["valid", "invalid", "schema", "compile-error"];
-    for entry in fs::read_dir(conformance_dir()).unwrap().filter_map(|e| e.ok()) {
+    for entry in fs::read_dir(require_conformance_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+    {
         let p = entry.path();
         if p.is_dir() {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
@@ -99,7 +122,10 @@ fn all_conformance_categories_are_known() {
 
 fn subdirs(p: &Path) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = fs::read_dir(p)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+        .unwrap_or_else(|_| {
+            require_conformance_dir();
+            panic!("cannot read {}", p.display())
+        })
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.is_dir())
@@ -147,9 +173,7 @@ fn valid_vectors() {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => expected_daiv
                 .strip_prefix(".!daiv")
                 .map(|rest| format!(".!raiv{rest}"))
-                .unwrap_or_else(|| {
-                    panic!("{name}: expected.daiv does not open with .!daiv")
-                }),
+                .unwrap_or_else(|| panic!("{name}: expected.daiv does not open with .!daiv")),
             Err(e) => panic!("{name}: cannot read expected.raiv: {e}"),
         };
 
@@ -228,9 +252,14 @@ fn schema_vectors() {
         // Every `*.expected` must have a paired `*.daiv`, and the dir
         // must hold at least one case — otherwise a mis-named or missing
         // file would silently pass the vector.
-        for entry in fs::read_dir(&vdir).into_iter().flatten().filter_map(|e| e.ok()) {
+        for entry in fs::read_dir(&vdir)
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.ok())
+        {
             let p = entry.path();
-            if p.extension().is_some_and(|x| x == "expected") && !p.with_extension("daiv").is_file() {
+            if p.extension().is_some_and(|x| x == "expected") && !p.with_extension("daiv").is_file()
+            {
                 failures.push(format!(
                     "{name}/{}: .expected has no paired .daiv",
                     p.file_stem().unwrap().to_string_lossy()
@@ -271,8 +300,9 @@ fn schema_vectors() {
 fn pipeline_error_name(e: &kaiv::PipelineError) -> Option<&'static str> {
     match e {
         kaiv::PipelineError::Lex(l) => Some(l.error.name()),
-        kaiv::PipelineError::App(a) => Some(a.name()),
+        kaiv::PipelineError::App(a) => Some(a.error.name()),
         kaiv::PipelineError::Other(_) => None,
+        other => other.name(),
     }
 }
 
@@ -399,7 +429,9 @@ fn fmt_preserves_compilation() {
                     ));
                 }
             }
-            Err(e) => failures.push(format!("{name}: fmt output does not compile: {e:?}\n--- fmt ---\n{fmted}")),
+            Err(e) => failures.push(format!(
+                "{name}: fmt output does not compile: {e:?}\n--- fmt ---\n{fmted}"
+            )),
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));

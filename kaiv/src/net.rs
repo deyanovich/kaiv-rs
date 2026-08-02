@@ -1,6 +1,6 @@
-//! Layer 3/4 network resolution (feature `net`, enabled by default;
-//! disable it for embedded/offline builds — the core pipeline has no
-//! other dependencies). Registry artifacts are immutable eternalinks,
+//! Layer 3/4 network resolution (feature `net`, opt-in — a default
+//! build makes no outbound request; the core pipeline has no
+//! dependencies at all). Registry artifacts are immutable eternalinks,
 //! so the on-disk cache never revalidates: a hit is served without
 //! touching the network, which also makes `KAIV_OFFLINE=1` (or the
 //! CLI `--offline` flag) a complete resolution mode over a warm
@@ -13,8 +13,13 @@ use std::path::{Path, PathBuf};
 /// Registry artifacts are small text files; anything bigger is wrong.
 const MAX_BODY: u64 = 4 * 1024 * 1024;
 
+/// A whole fetch — connect, headers, body — may not outlast this. An
+/// unreachable or stalled registry must fail resolution, not hang the
+/// build indefinitely.
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn err() -> PipelineError {
-    PipelineError::App(AppError::SchemaResolution)
+    PipelineError::app(AppError::SchemaResolution)
 }
 
 /// The default cache root: `KAIV_CACHE_DIR`, else
@@ -70,7 +75,12 @@ pub(crate) fn fetch(
     if offline {
         return Err(err());
     }
-    let mut res = ureq::get(url).call().map_err(|_| err())?;
+    let mut res = ureq::get(url)
+        .config()
+        .timeout_global(Some(TIMEOUT))
+        .build()
+        .call()
+        .map_err(|_| err())?;
     let bytes = res
         .body_mut()
         .with_config()
@@ -180,7 +190,7 @@ mod tests {
     fn offline_with_cold_cache_fails() {
         let root = tmp_root("cold");
         let r = fetch("http://127.0.0.1:9/x.taiv", Some(&root), true);
-        assert_eq!(r, Err(PipelineError::App(AppError::SchemaResolution)));
+        assert_eq!(r, Err(PipelineError::app(AppError::SchemaResolution)));
         let _ = std::fs::remove_dir_all(&root);
     }
 

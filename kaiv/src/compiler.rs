@@ -16,6 +16,8 @@ pub fn compile(input: &[u8]) -> Result<String, PipelineError> {
     compile_with(input, &Resolver::offline())
 }
 
+/// [`compile`] with a resolver for `.!types` imports and `&name`
+/// references.
 pub fn compile_with(input: &[u8], resolver: &Resolver) -> Result<String, PipelineError> {
     let lines = lex(input, FileKind::Data).map_err(PipelineError::Lex)?;
     let mut c = Compiler::new(resolver);
@@ -26,7 +28,7 @@ pub fn compile_with(input: &[u8], resolver: &Resolver) -> Result<String, Pipelin
     // An annotation still pending at EOF never found its data line
     // (SPEC.md § Application Errors, MetadataWithoutTargetError).
     if c.pending_anno.is_some() || c.pending_prov.is_some() {
-        return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+        return Err(PipelineError::app(AppError::MetadataWithoutTarget));
     }
     // Scoped `.!schema` declarations (block discriminants, D-10)
     // join the leading declaration run — declarations precede
@@ -414,9 +416,16 @@ fn canonical_name(name: &str) -> String {
     let b = name.as_bytes();
     let bare = !b.is_empty()
         && (b[0].is_ascii_alphabetic() || b[0] == b'_')
-        && b[1..].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_');
-    // Reserved bare word `re` must be quoted in name position.
-    if bare && name != "re" {
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_');
+    // `re` is reserved only in the leading name position of an
+    // AUTHORED .saiv/.taiv content line, where it would open a
+    // constraint triple. This is canonical output, where the
+    // bare-name rule is absolute — quoting it here would give one
+    // document two canonical spellings, since a name arriving
+    // already quoted normalizes down to bare.
+    if bare {
         name.to_string()
     } else {
         format!("\"{}\"", name.replace('"', "\"\""))
@@ -451,7 +460,7 @@ impl<'r> Compiler<'r> {
                 // A metadata annotation must be immediately followed by
                 // a data line (SPEC.md MetadataWithoutTargetError).
                 if self.pending_anno.is_some() || self.pending_prov.is_some() {
-                    return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+                    return Err(PipelineError::app(AppError::MetadataWithoutTarget));
                 }
                 Ok(())
             }
@@ -524,13 +533,13 @@ impl<'r> Compiler<'r> {
     /// target namespace and is a VariableContextError.
     fn var_splat(&mut self, name: &str) -> Result<(), PipelineError> {
         if self.blocks.is_empty() {
-            return Err(PipelineError::App(AppError::VariableContext));
+            return Err(PipelineError::app(AppError::VariableContext));
         }
         let pairs = self
             .ns_vars
             .get(name)
             .cloned()
-            .ok_or(PipelineError::App(AppError::UndefinedReference))?;
+            .ok_or(PipelineError::app(AppError::UndefinedReference))?;
         let steps = self.prefix_steps();
         for (k, v) in pairs {
             self.emit_pair(&steps, &k, v)?;
@@ -547,7 +556,7 @@ impl<'r> Compiler<'r> {
         // reached a data line.
         if s.starts_with('!') {
             if self.pending_anno.is_some() {
-                return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+                return Err(PipelineError::app(AppError::MetadataWithoutTarget));
             }
             let mut a = parse_annotation(s)
                 .ok_or_else(|| PipelineError::Other(format!("bad annotation: {s}")))?;
@@ -555,7 +564,7 @@ impl<'r> Compiler<'r> {
             // slot: a standalone `?` line pending alongside it is a
             // same-kind second annotation.
             if a.provenance.is_some() && self.pending_prov.is_some() {
-                return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+                return Err(PipelineError::app(AppError::MetadataWithoutTarget));
             }
             // A unit is exclusive with a union (grammar; same rule as
             // the schema compiler): the active variant may be `null`,
@@ -592,7 +601,7 @@ impl<'r> Compiler<'r> {
                     .as_ref()
                     .is_some_and(|a| a.provenance.is_some())
             {
-                return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+                return Err(PipelineError::app(AppError::MetadataWithoutTarget));
             }
             // A standalone provenance line must obey the provenance-list
             // grammar so the emitted prefix re-lexes (SPEC.md § 10.5).
@@ -604,7 +613,7 @@ impl<'r> Compiler<'r> {
             self.pending_prov = Some(p.to_string());
         } else if let Some(rest) = s.strip_prefix('&') {
             if self.pending_anno.is_some() {
-                return Err(PipelineError::App(AppError::MetadataWithoutTarget));
+                return Err(PipelineError::app(AppError::MetadataWithoutTarget));
             }
             // `&name` resolves against std/core (short form) or the
             // document's `.!types` imports (canonical library path).
@@ -700,7 +709,7 @@ impl<'r> Compiler<'r> {
         steps.extend(path_steps(head)?);
         if let Some(sel) = toks.iter().find_map(|t| t.strip_prefix("schema:")) {
             if sel.is_empty() || sel.contains('|') || toks.len() != 2 {
-                return Err(PipelineError::App(AppError::SchemaDelegation));
+                return Err(PipelineError::app(AppError::SchemaDelegation));
             }
             let mut np = String::new();
             for s in &steps {
@@ -839,7 +848,7 @@ impl<'r> Compiler<'r> {
                 .array_vars
                 .get(name)
                 .cloned()
-                .ok_or(PipelineError::App(AppError::UndefinedReference));
+                .ok_or(PipelineError::app(AppError::UndefinedReference));
         }
         Ok(vec![self.resolve_value(value)?])
     }
@@ -874,7 +883,7 @@ impl<'r> Compiler<'r> {
                 .split_once(':')
                 // An entry without `:` means a `:`/`;` collided with
                 // the inline map form's delimiters (SPEC.md § Errors).
-                .ok_or(PipelineError::App(AppError::DelimiterCollision))?;
+                .ok_or(PipelineError::app(AppError::DelimiterCollision))?;
             if k.is_empty() {
                 // An empty map key would emit an empty quoted name
                 // (`""`), which violates 1*qn-char and fails re-lex.
@@ -904,7 +913,7 @@ impl<'r> Compiler<'r> {
                 .ns_vars
                 .get(name)
                 .cloned()
-                .ok_or(PipelineError::App(AppError::UndefinedReference));
+                .ok_or(PipelineError::app(AppError::UndefinedReference));
         }
         let mut pairs = Vec::new();
         for pair in value.split('|') {
@@ -912,7 +921,7 @@ impl<'r> Compiler<'r> {
                 .split_once('=')
                 // A piece without `=` means a `|` collided with the
                 // pair form's delimiter (SPEC.md § Errors).
-                .ok_or(PipelineError::App(AppError::DelimiterCollision))?;
+                .ok_or(PipelineError::app(AppError::DelimiterCollision))?;
             let v = self.resolve_value(v)?;
             pairs.push((k.to_string(), v));
         }
@@ -973,7 +982,7 @@ impl<'r> Compiler<'r> {
         // (SPEC.md § Namespace-Variable Splat). Splice positions go
         // through splice_or_single / parse_pairs, never here.
         if value.starts_with("$@.") || value.starts_with("$/.") {
-            return Err(PipelineError::App(AppError::VariableContext));
+            return Err(PipelineError::app(AppError::VariableContext));
         }
         let b = value.as_bytes();
         let mut out = String::with_capacity(value.len());
@@ -1001,13 +1010,13 @@ impl<'r> Compiler<'r> {
                     let start = i + 2;
                     let end = start + ident_len(&b[start..]);
                     if end == start {
-                        return Err(PipelineError::App(AppError::UndefinedReference));
+                        return Err(PipelineError::app(AppError::UndefinedReference));
                     }
                     let name = &value[start..end];
                     let v = self
                         .scalar_vars
                         .get(name)
-                        .ok_or(PipelineError::App(AppError::UndefinedReference))?;
+                        .ok_or(PipelineError::app(AppError::UndefinedReference))?;
                     out.push_str(&escape_dollars(v));
                     i = end;
                 }
@@ -1017,10 +1026,10 @@ impl<'r> Compiler<'r> {
                 // field reference and falls through to the `_` arm
                 // (SPEC.md § 2.5.3: the `.` is the discriminant).
                 Some(b'@') if b.get(i + 2) == Some(&b'.') => {
-                    return Err(PipelineError::App(AppError::VariableContext));
+                    return Err(PipelineError::app(AppError::VariableContext));
                 }
                 Some(b'/') if b.get(i + 2) == Some(&b'.') => {
-                    return Err(PipelineError::App(AppError::VariableContext));
+                    return Err(PipelineError::app(AppError::VariableContext));
                 }
                 _ => {
                     // `$field` / `$path::field` field reference.
@@ -1028,7 +1037,7 @@ impl<'r> Compiler<'r> {
                     let end = start + fieldref_len(&b[start..]);
                     if end == start {
                         // Lone `$` — write `$$` for a literal dollar.
-                        return Err(PipelineError::App(AppError::UndefinedReference));
+                        return Err(PipelineError::app(AppError::UndefinedReference));
                     }
                     out.push('$');
                     out.push_str(&self.qualify_ref(&value[start..end]));
@@ -1067,13 +1076,13 @@ impl<'r> Compiler<'r> {
                     let start = i + 2;
                     let end = start + ident_len(&b[start..]);
                     if end == start {
-                        return Err(PipelineError::App(AppError::UndefinedReference));
+                        return Err(PipelineError::app(AppError::UndefinedReference));
                     }
                     let name = &value[start..end];
                     let v = self
                         .scalar_vars
                         .get(name)
-                        .ok_or(PipelineError::App(AppError::UndefinedReference))?;
+                        .ok_or(PipelineError::app(AppError::UndefinedReference))?;
                     out.push_str(v);
                     i = end;
                 }
@@ -1115,8 +1124,12 @@ impl<'r> Compiler<'r> {
             }
             _ => self.render_prefix(),
         };
-        self.out
-            .push(format!("{prefix}'{}::{}={}", render_path(steps), field, value));
+        self.out.push(format!(
+            "{prefix}'{}::{}={}",
+            render_path(steps),
+            field,
+            value
+        ));
         Ok(())
     }
 
@@ -1131,12 +1144,11 @@ impl<'r> Compiler<'r> {
         a: &Annotation,
         value: &str,
     ) -> Result<Annotation, PipelineError> {
-        let alts = std::iter::once((a.type_name.as_str(), &a.constraints, a.unit.as_ref()))
-            .chain(
-                a.union
-                    .iter()
-                    .map(|alt| (alt.name.as_str(), &alt.constraints, alt.unit.as_ref())),
-            );
+        let alts = std::iter::once((a.type_name.as_str(), &a.constraints, a.unit.as_ref())).chain(
+            a.union
+                .iter()
+                .map(|alt| (alt.name.as_str(), &alt.constraints, alt.unit.as_ref())),
+        );
         for (name, narrowing, unit) in alts {
             if self.variant_accepts(name, narrowing, value)? {
                 return Ok(Annotation {
@@ -1150,7 +1162,7 @@ impl<'r> Compiler<'r> {
                 });
             }
         }
-        Err(PipelineError::App(AppError::TypeMismatch))
+        Err(PipelineError::app(AppError::TypeMismatch))
     }
 
     /// Whether a value satisfies one union alternative, lowered
@@ -1164,8 +1176,13 @@ impl<'r> Compiler<'r> {
     ) -> Result<bool, PipelineError> {
         // Value acceptance is unit-independent (the unit is identity,
         // not a value constraint), so the alternative renders unitless.
-        let rendered =
-            crate::schema::render_union_alt(name, narrowing, None, self.resolver, &self.registries)?;
+        let rendered = crate::schema::render_union_alt(
+            name,
+            narrowing,
+            None,
+            self.resolver,
+            &self.registries,
+        )?;
         let inner = rendered
             .strip_prefix(name)
             .and_then(|s| s.strip_prefix('('))
@@ -1174,9 +1191,8 @@ impl<'r> Compiler<'r> {
         if inner.is_empty() {
             return Ok(true); // unconstrained (str-like): accepts anything
         }
-        let items = parse_constraint_items(inner).ok_or_else(|| {
-            PipelineError::Other(format!("unloadable union alternative: {name}"))
-        })?;
+        let items = parse_constraint_items(inner)
+            .ok_or_else(|| PipelineError::Other(format!("unloadable union alternative: {name}")))?;
         Ok(crate::validator::default_applicable(&items, value))
     }
 
@@ -1244,7 +1260,11 @@ fn render_prefix_for(a: &Annotation, prov: Option<&str>) -> String {
         // The elided-type unit annotation stays elided in `.raiv`
         // (D-15) — the schema-aware Denormalizer resolves it; a
         // fully unannotated line is the identity str.
-        if a.unit.is_some() { "" } else { "str" }
+        if a.unit.is_some() {
+            ""
+        } else {
+            "str"
+        }
     } else {
         &a.type_name
     });
@@ -1307,6 +1327,36 @@ mod tests {
     fn build(input: &str) -> String {
         let raiv = crate::compile(input.as_bytes()).unwrap();
         crate::denorm::denormalize(&raiv).unwrap()
+    }
+
+    #[test]
+    fn canonical_quoting_does_not_depend_on_the_authored_form() {
+        // Canonical form has exactly one spelling per namepath
+        // (SPEC.md § When to Quote): a name matching `bare-name` MUST
+        // NOT be quoted, whichever authoring form produced it. `re`
+        // is the interesting case — it is reserved in the leading
+        // name position of an AUTHORED .saiv/.taiv content line, and
+        // the inline-pair path used to carry that quoting into
+        // canonical data, so `/x:=re=` and `/x::re=` canonicalized
+        // differently and a schema inferred from one rejected the
+        // other.
+        for authored in [
+            ".!kaiv 1\n!null\n/x:=re=\n",
+            ".!kaiv 1\n!null\n/x::re=\n",
+            ".!kaiv 1\n!null\n/x::\"re\"=\n",
+        ] {
+            let d = build(authored);
+            assert!(d.contains("!null'/x::re=\n"), "{authored:?} -> {d}");
+        }
+        // A name that genuinely needs quoting still gets it, from
+        // either form.
+        for authored in [
+            ".!kaiv 1\n!null\n/x:=\"a-b\"=\n",
+            ".!kaiv 1\n!null\n/x::\"a-b\"=\n",
+        ] {
+            let d = build(authored);
+            assert!(d.contains("!null'/x::\"a-b\"=\n"), "{authored:?} -> {d}");
+        }
     }
 
     #[test]
@@ -1403,7 +1453,7 @@ mod tests {
 
     fn app_err(input: &str) -> Option<AppError> {
         match crate::compile(input.as_bytes()) {
-            Err(PipelineError::App(e)) => Some(e),
+            Err(PipelineError::App(e)) => Some(e.error),
             _ => None,
         }
     }
@@ -1454,16 +1504,19 @@ mod tests {
         assert!(crate::compile(b".!kaiv 1\n?src'oops\nx=1\n").is_err());
         assert!(crate::compile(b".!kaiv 1\n?a,b#=c\nx=1\n").is_err());
         let ok = crate::compile(b".!kaiv 1\n?sensor1@20250115T093000Z#req-42\ntemp=100\n").unwrap();
-        assert!(ok.contains("?sensor1@20250115T093000Z#req-42'::temp=100"), "{ok}");
+        assert!(
+            ok.contains("?sensor1@20250115T093000Z#req-42'::temp=100"),
+            "{ok}"
+        );
     }
 
     #[test]
     fn unquoted_apostrophe_key_rejected_quoted_ok() {
         assert!(crate::compile(b".!kaiv 1\nit's=5\n").is_err());
-        assert!(
-            crate::compile(b".!kaiv 1\n!int?sensor1@20250115T093000Z#req-42'/readings::temp=100\n")
-                .is_err()
-        );
+        assert!(crate::compile(
+            b".!kaiv 1\n!int?sensor1@20250115T093000Z#req-42'/readings::temp=100\n"
+        )
+        .is_err());
         let ok = crate::compile(b".!kaiv 1\n\"it's\"=5\n").unwrap();
         assert!(ok.contains("::\"it's\"=5"), "{ok}");
         assert!(relexes(&ok));

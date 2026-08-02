@@ -46,6 +46,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert an ASN.1 DER document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let pem;
     let der = if is_pem(input) {
@@ -66,13 +67,14 @@ pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     json::import_val(&members, false)
 }
 
+/// Convert a canonical `.raiv` / `.daiv` to ASN.1 DER.
 pub fn export(canonical: &str) -> Result<Vec<u8>, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,
@@ -900,11 +902,7 @@ fn encode_gentime(token: &str, out: &mut Vec<u8>) -> Result<(), PipelineError> {
 /// to UTC. Offsets are whole minutes, so seconds pass through.
 fn compact_to_utc(compact: &str, zone: &str) -> Result<String, PipelineError> {
     let num = |s: &str| s.parse::<i64>().expect("digits");
-    let (y, mo, d) = (
-        num(&compact[..4]),
-        num(&compact[4..6]),
-        num(&compact[6..8]),
-    );
+    let (y, mo, d) = (num(&compact[..4]), num(&compact[4..6]), num(&compact[6..8]));
     let (h, mi) = (num(&compact[8..10]), num(&compact[10..12]));
     let sec = &compact[12..14];
     let sign = if zone.starts_with('-') { -1i64 } else { 1 };

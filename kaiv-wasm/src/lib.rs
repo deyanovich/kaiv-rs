@@ -22,7 +22,13 @@ fn ok_bin(bytes: &[u8]) -> String {
             let hexes: Vec<String> = row.iter().map(|b| format!("{b:02x}")).collect();
             let ascii: String = row
                 .iter()
-                .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                .map(|&b| {
+                    if (0x20..0x7f).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
             format!("{:08x}: {:<47} {}", i * 16, hexes.join(" "), ascii)
         })
@@ -41,10 +47,7 @@ fn err(msg: impl std::fmt::Display) -> String {
 /// Minimal JSON object writer (the crate is dependency-light on
 /// purpose; the envelope is flat strings).
 fn serde_none(fields: &[(&str, String)]) -> String {
-    let body: Vec<String> = fields
-        .iter()
-        .map(|(k, v)| format!("\"{k}\":{v}"))
-        .collect();
+    let body: Vec<String> = fields.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect();
     format!("{{{}}}", body.join(","))
 }
 fn quote(s: &str) -> String {
@@ -68,7 +71,11 @@ fn b64url(bytes: &[u8]) -> String {
     const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(A[(n >> 18) as usize & 63] as char);
         out.push(A[(n >> 12) as usize & 63] as char);
@@ -267,7 +274,8 @@ pub fn build_with(input: &str, schema_name: &str, saiv: &str) -> String {
 #[wasm_bindgen]
 pub fn build(input: &str) -> String {
     let r = kaiv::Resolver::offline();
-    match kaiv::compile_with(input.as_bytes(), &r).and_then(|raiv| kaiv::denorm::denormalize_with(&raiv, &r))
+    match kaiv::compile_with(input.as_bytes(), &r)
+        .and_then(|raiv| kaiv::denorm::denormalize_with(&raiv, &r))
     {
         Ok(daiv) => ok(daiv),
         Err(e) => err(e),
@@ -301,9 +309,15 @@ pub fn export(format: &str, daiv: &str) -> String {
         "yaml" => kaiv::yaml::export(daiv).map(ok).unwrap_or_else(err),
         "toml" => kaiv::toml::export(daiv).map(ok).unwrap_or_else(err),
         "xml" => kaiv::xml::export(daiv).map(ok).unwrap_or_else(err),
-        "cbor" => kaiv::cbor::export(daiv).map(|b| ok_bin(&b)).unwrap_or_else(err),
-        "avro" => kaiv::avro::export(daiv).map(|b| ok_bin(&b)).unwrap_or_else(err),
-        "asn1" => kaiv::asn1::export(daiv).map(|b| ok_bin(&b)).unwrap_or_else(err),
+        "cbor" => kaiv::cbor::export(daiv)
+            .map(|b| ok_bin(&b))
+            .unwrap_or_else(err),
+        "avro" => kaiv::avro::export(daiv)
+            .map(|b| ok_bin(&b))
+            .unwrap_or_else(err),
+        "asn1" => kaiv::asn1::export(daiv)
+            .map(|b| ok_bin(&b))
+            .unwrap_or_else(err),
         other => err(format!("unsupported export format: {other}")),
     }
 }
@@ -349,7 +363,11 @@ pub fn infer(input: &str, name: &str) -> String {
 #[wasm_bindgen(js_name = importSchema)]
 pub fn import_schema(format: &str, input: &str, name: &str, message: &str) -> String {
     let bytes = input.as_bytes();
-    let msg = if message.is_empty() { None } else { Some(message) };
+    let msg = if message.is_empty() {
+        None
+    } else {
+        Some(message)
+    };
     let res = match format {
         "jsonschema" => kaiv::jsonschema::import(bytes, name),
         "xsd" => kaiv::xsd::import_schema(bytes, msg, name),

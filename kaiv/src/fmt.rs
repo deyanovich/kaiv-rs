@@ -68,7 +68,9 @@ fn is_bare_name(s: &str) -> bool {
     let b = s.as_bytes();
     !b.is_empty()
         && (b[0].is_ascii_alphabetic() || b[0] == b'_')
-        && b[1..].iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'_')
 }
 
 fn is_index(s: &str) -> bool {
@@ -97,8 +99,15 @@ fn norm_decl(s: &str) -> String {
     if toks.len() >= 2
         && matches!(
             toks[0],
-            ".!kaiv" | ".!raiv" | ".!daiv" | ".!maiv" | ".!saiv" | ".!csaiv" | ".!taiv"
-                | ".!faiv" | ".!msaiv"
+            ".!kaiv"
+                | ".!raiv"
+                | ".!daiv"
+                | ".!maiv"
+                | ".!saiv"
+                | ".!csaiv"
+                | ".!taiv"
+                | ".!faiv"
+                | ".!msaiv"
         )
         && crate::lexer::is_version_one(toks[1])
     {
@@ -170,7 +179,10 @@ impl Tracker {
     }
 
     fn prefix(&self) -> Vec<String> {
-        self.blocks.last().map(|b| b.steps().to_vec()).unwrap_or_default()
+        self.blocks
+            .last()
+            .map(|b| b.steps().to_vec())
+            .unwrap_or_default()
     }
 
     fn next_index(&mut self, key: &str) -> usize {
@@ -439,8 +451,7 @@ fn content_line(
         LeftKind::ElemAssign(p) if !in_block && metas.is_empty() => {
             match (simple_steps(p), split_pairs(value)) {
                 (Some(head), Some(pairs))
-                    if p.starts_with('/')
-                        && head.last().is_some_and(|s| s.starts_with('@')) =>
+                    if p.starts_with('/') && head.last().is_some_and(|s| s.starts_with('@')) =>
                 {
                     let key = render_path(&head);
                     let idx = tracker.next_index(&key);
@@ -580,13 +591,15 @@ fn raw_line(l: &crate::lexer::Line<'_>, nodes: &mut Vec<Node>) {
         LineKind::Doc(c) => nodes.push(Node::Comment(norm_comment("//", c))),
         LineKind::Decl(s) => nodes.push(Node::Raw(norm_decl(s))),
         LineKind::Meta(s) => nodes.push(Node::Raw(s.trim_end().to_string())),
-        LineKind::SectionOpen(inner) => {
-            nodes.push(Node::Raw(format!("[{}]", crate::table::tokens(inner).join(" "))))
-        }
+        LineKind::SectionOpen(inner) => nodes.push(Node::Raw(format!(
+            "[{}]",
+            crate::table::tokens(inner).join(" ")
+        ))),
         LineKind::SectionClose => nodes.push(Node::Raw("[]".into())),
-        LineKind::NsOpen(inner) => {
-            nodes.push(Node::Raw(format!("({})", crate::table::tokens(inner).join(" "))))
-        }
+        LineKind::NsOpen(inner) => nodes.push(Node::Raw(format!(
+            "({})",
+            crate::table::tokens(inner).join(" ")
+        ))),
         LineKind::NsClose => nodes.push(Node::Raw("()".into())),
         LineKind::Content { left, value } => nodes.push(Node::Raw(format!("{left}={value}"))),
         LineKind::VarSplat(name) => nodes.push(Node::Raw(format!("$/.{name}"))),
@@ -782,9 +795,7 @@ fn destination(f: &Field) -> GroupKind {
         .collect();
     match idx_positions.as_slice() {
         [] => GroupKind::Struct(f.path.clone()),
-        [i] if *i > 0 && f.path[i - 1].starts_with('@') => {
-            GroupKind::Array(f.path[..*i].to_vec())
-        }
+        [i] if *i > 0 && f.path[i - 1].starts_with('@') => GroupKind::Array(f.path[..*i].to_vec()),
         _ => GroupKind::Struct(f.path.clone()), // nested arrays: flat fallback
     }
 }
@@ -827,7 +838,9 @@ fn render(shebang: Option<String>, nodes: Vec<Node>) -> String {
                             if !same {
                                 break;
                             }
-                            let Some(Node::Field(f)) = it.next() else { unreachable!() };
+                            let Some(Node::Field(f)) = it.next() else {
+                                unreachable!()
+                            };
                             g.items.push(GItem::Field(f));
                         }
                         Some(Node::Comment(_) | Node::Gap) => {
@@ -913,8 +926,7 @@ fn render(shebang: Option<String>, nodes: Vec<Node>) -> String {
             }
             Unit::Group(g) => {
                 let (lines, blocky) = render_group(g);
-                if started && !prev_comment && (pending_gap || prev_block || prev_decl || blocky)
-                {
+                if started && !prev_comment && (pending_gap || prev_block || prev_decl || blocky) {
                     out.push(String::new());
                 }
                 out.extend(lines);
@@ -1190,7 +1202,8 @@ pub fn unbuild(input: &str) -> Result<String, PipelineError> {
         .find(|k| crate::lexer::expect_kind(input, k).is_ok());
     let Some(kind) = which else {
         return Err(PipelineError::Other(
-            "unbuild expects a canonical .daiv or .raiv stream (with its format declaration)".into(),
+            "unbuild expects a canonical .daiv or .raiv stream (with its format declaration)"
+                .into(),
         ));
     };
     let nodes = parse_canonical(input, *kind == "daiv")?;
@@ -1250,7 +1263,10 @@ mod tests {
     #[test]
     fn small_struct_goes_inline() {
         let src = ".!kaiv\n/server/api::host=localhost\n/server/api::port=8080\n";
-        assert_eq!(fmt(src), ".!kaiv\n\n/server/api:=host=localhost|port=8080\n");
+        assert_eq!(
+            fmt(src),
+            ".!kaiv\n\n/server/api:=host=localhost|port=8080\n"
+        );
     }
 
     #[test]
@@ -1332,7 +1348,10 @@ mod tests {
     #[test]
     fn unbuild_provenance() {
         let daiv = ".!daiv\n!str?sensor@20260101T000000Z'::t=21\n";
-        assert_eq!(unbuild(daiv).unwrap(), ".!kaiv\n\n?sensor@20260101T000000Z\nt=21\n");
+        assert_eq!(
+            unbuild(daiv).unwrap(),
+            ".!kaiv\n\n?sensor@20260101T000000Z\nt=21\n"
+        );
     }
 
     #[test]

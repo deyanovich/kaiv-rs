@@ -180,7 +180,7 @@ fn get_bearer(url: &str, token: &str) -> Result<(u16, String), String> {
 // the standard escapes (tokens and emails never carry them, error
 // descriptions may).
 
-fn json_str_field(body: &str, key: &str) -> Option<String> {
+pub(crate) fn json_str_field(body: &str, key: &str) -> Option<String> {
     let value_at = find_value(body, key)?;
     let rest = &body[value_at..];
     if !rest.starts_with('"') {
@@ -278,8 +278,8 @@ pub fn begin_login(email: &str) -> Result<DeviceGrant, String> {
     if status != 200 {
         return Err(format!("sign-in refused: {}", oauth_error(&body)));
     }
-    let device_code = json_str_field(&body, "device_code")
-        .ok_or("initiation response lacks device_code")?;
+    let device_code =
+        json_str_field(&body, "device_code").ok_or("initiation response lacks device_code")?;
     let user_code =
         json_str_field(&body, "user_code").ok_or("initiation response lacks user_code")?;
     let interval = json_u64_field(&body, "interval").unwrap_or(5);
@@ -361,9 +361,7 @@ pub fn access_token(credentials: &mut Credentials) -> Result<String, String> {
 
 /// The account as idaiv sees it (`GET /account`):
 /// `(id, email, handle)`.
-pub fn whoami(
-    credentials: &mut Credentials,
-) -> Result<(String, String, Option<String>), String> {
+pub fn whoami(credentials: &mut Credentials) -> Result<(String, String, Option<String>), String> {
     let token = access_token(credentials)?;
     let (status, body) = get_bearer(&format!("{}/account", credentials.issuer), &token)?;
     if status != 200 {
@@ -451,7 +449,10 @@ mod tests {
             Some("say \"hi\" é")
         );
         let value_not_key = r#"{"a":"error","error":"real"}"#;
-        assert_eq!(json_str_field(value_not_key, "error").as_deref(), Some("real"));
+        assert_eq!(
+            json_str_field(value_not_key, "error").as_deref(),
+            Some("real")
+        );
     }
 
     #[test]

@@ -33,6 +33,7 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert a CBOR document to authored `.kaiv`.
 pub fn import(input: &[u8]) -> Result<String, PipelineError> {
     let mut d = D { b: input, i: 0 };
     let root = d.item(0)?;
@@ -288,13 +289,14 @@ fn f16_to_f64(h: u16) -> f64 {
 
 // --------------------------------------------------------------- export
 
+/// Convert a canonical `.raiv` / `.daiv` to CBOR.
 pub fn export(canonical: &str) -> Result<Vec<u8>, PipelineError> {
     export_tree(json::tree(canonical)?)
 }
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     resolver: &crate::resolve::Resolver,

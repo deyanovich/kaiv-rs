@@ -1,24 +1,24 @@
 [package]
 name = "kaiv-lsp"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
-rust-version = "1.84.0"
+rust-version = "1.85.0"
 description = "Language server for the kaiv file family: live per-file diagnostics from the kaiv pipeline"
 license = "MIT OR Apache-2.0"
 repository = "https://gitlab.com/kaiv-format/kaiv-rs"
 keywords = ["kaiv", "lsp", "language-server", "diagnostics"]
 categories = ["development-tools", "parser-implementations"]
 readme = "README.md"
+homepage = "https://kaiv.io/"
 
 [[bin]]
 name = "kaiv-lsp"
 path = "src/main.rs"
 
 [dependencies]
-# Offline core: diagnostics never need the net feature. The collation
-# backend must match kaiv-cli's (the two are built together by the
-# workspace and the kaiv features unify): ICU, not colligo.
-kaiv = { path = "../kaiv", version = "0.11", default-features = false, features = ["collation-icu"] }
+# Offline core: diagnostics never need the net feature. ICU collation
+# is the default backend and the one kaiv-cli builds with.
+kaiv = { path = "../kaiv", version = "0.12", default-features = false, features = ["collation-icu"] }
 lsp-server = "0.7"
 lsp-types = "0.97"
 serde_json = "1"

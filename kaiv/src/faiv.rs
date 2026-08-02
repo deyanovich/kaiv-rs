@@ -11,13 +11,17 @@ use crate::lexer::{lex, FileKind, LineKind};
 use crate::unit;
 use std::collections::BTreeMap;
 
+/// A parsed `.faiv` unit-definition library.
 #[derive(Debug, Clone)]
 pub struct UnitLib {
     /// Library path from `.!faiv` (e.g. `astro/units`).
     pub library: String,
+    /// Unit name → definition, aliases included.
     pub units: BTreeMap<String, UnitDef>,
 }
 
+/// One unit definition: its dimension and the factor taking it
+/// to that dimension's base unit.
 #[derive(Debug, Clone, Default)]
 pub struct UnitDef {
     /// Dimension by unit reference (`m`, `kg*m/s^2`) or `$` (currency).
@@ -103,6 +107,7 @@ fn decimal_ok(s: &str) -> bool {
     mantissa_ok && exp_ok
 }
 
+/// Parse a `.faiv` unit-definition library.
 pub fn parse_faiv(input: &[u8]) -> Result<UnitLib, PipelineError> {
     let lines = lex(input, FileKind::UnitLib).map_err(PipelineError::Lex)?;
     let mut library = String::new();

@@ -14,6 +14,9 @@
 //! 5. `infer` produces a schema its example document validates
 //!    against, for arbitrary documents.
 //! 6. No importer panics on mutated or garbage input.
+//! 7. No exporter panics on mutated canonical input, and a
+//!    namepath deeper than the cap is refused rather than
+//!    recursed (the shape that once overflowed the stack).
 #![cfg(all(
     feature = "yaml",
     feature = "toml",
@@ -710,6 +713,65 @@ fn core_pipeline_never_panics_on_garbage() {
             assert!(
                 res.is_ok(),
                 "seed {seed}: core lex/compile PANICKED on mutated daiv: {bytes:?}"
+            );
+        }
+    }
+}
+
+/// Every exporter walks the tree `json::tree` builds, and that walk
+/// used to recurse once per namepath segment with nothing bounding
+/// the segment count — a stack overflow reachable through all eight
+/// exporters from a single long `.daiv` line. `catch_unwind` cannot
+/// see an overflow (it aborts the process), so the property to assert
+/// is the one the fix establishes: a namepath past the cap is refused,
+/// and everything at or under it still exports.
+#[test]
+fn exporters_refuse_overdeep_namepaths_and_survive_mutation() {
+    // Well past any plausible cap: this is the shape that overflowed.
+    let deep = format!(".!daiv\n!str'{}::x=v\n", "/a".repeat(50_000));
+    for fmt in FORMATS {
+        let res = catch_unwind(AssertUnwindSafe(|| fmt_export(fmt, &deep)));
+        match res {
+            Ok(Ok(_)) => panic!("{fmt}: exported a 50k-segment namepath"),
+            Ok(Err(_)) => {}
+            Err(_) => panic!("{fmt}: PANICKED on a deep namepath"),
+        }
+    }
+    // The cap is not so tight that ordinary nesting trips it. ASN.1
+    // is excluded: its export is positional and schema-less, so every
+    // namespace must be a wrapper named for its ASN.1 type — it
+    // rejects `/a` at any depth, for its own reasons.
+    let nested = format!(".!daiv\n!str'{}::x=v\n", "/a".repeat(64));
+    for fmt in FORMATS.iter().filter(|f| **f != "asn1") {
+        assert!(
+            fmt_export(fmt, &nested).is_ok(),
+            "{fmt}: rejected a 64-segment namepath"
+        );
+    }
+
+    // Mutated canonical input through the exporters: the importers
+    // already get this treatment, the export direction did not.
+    let n = iters(40);
+    for seed in 0..n {
+        let mut r = Rng::new(seed ^ 0x3ee7);
+        let doc = gen_doc(&mut r);
+        let Some(daiv) = daiv_of(&doc) else { continue };
+        let mut bytes = daiv.into_bytes();
+        for _ in 0..1 + r.below(6) {
+            if bytes.is_empty() {
+                break;
+            }
+            let i = r.below(bytes.len() as u64) as usize;
+            bytes[i] = r.next() as u8;
+        }
+        let Ok(text) = String::from_utf8(bytes) else {
+            continue;
+        };
+        for fmt in FORMATS {
+            let res = catch_unwind(AssertUnwindSafe(|| fmt_export(fmt, &text)));
+            assert!(
+                res.is_ok(),
+                "seed {seed}: {fmt} export PANICKED on mutated daiv: {text:?}"
             );
         }
     }

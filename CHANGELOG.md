@@ -5,7 +5,122 @@ All notable changes to kaiv-rs will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but note that pre-1.0 releases may not adhere strictly to all
-guidelines.
+guidelines. One entry covers the whole workspace; where the crates'
+versions differ, the entry names them.
+
+[0.12.0] - 2026-08-01
+---------------------
+
+Versions in this entry: `kaiv` 0.12.0, `kaiv-cli` 0.12.0,
+`kaiv-lsp` 0.1.4, `kaiv-wasm` 0.12.0.
+
+### Added
+
+- **`kaiv publish` — the write half of the registry story.** Every
+  other verb reads from registries; this one puts artifacts into
+  them, through the gate's synchronous validation, and surfaces a
+  refusal as the reference validator's own message verbatim.
+
+  Addresses are derived, never guessed: `.taiv`/`.saiv`/`.csaiv`/
+  `.faiv` publish to the identity in their own format declaration,
+  `.kaiv`/`.raiv` by basename under `--namespace`, `.daiv` by the
+  BLAKE3 hex of its bytes, `.maiv` by an explicit `--as`. The
+  registry follows from the extension, and a `--registry`
+  disagreement is an error rather than a silent redirect.
+
+  `--batch` sends one SRCN pack per cella in registry order
+  (t, f, s, d) so a batch may carry its own dependency closure in
+  any order; records denied for a not-yet-published dependency
+  retry in bounded fixed-point rounds. `--dry-run` prints the
+  resolved plan and sends nothing — including when no credential
+  is present, since inspecting a plan is what precedes signing in.
+  Deposits are write-once: identical bytes republish idempotently,
+  different bytes under a taken name are refused. The production
+  `k*aiv.com` registries are refused unless `--production` is
+  passed.
+
+  Auth is `--token`, then `KAIV_TOKEN`, then the stored
+  `kaiv login` session. This adds `blake3` to `kaiv-cli` for the
+  content addresses.
+
+### Fixed
+
+- **Four unbounded paths in the interop layer**, each reachable
+  from untrusted input and each verified to misbehave before the
+  fix. `jsonschema::import` panicked on a root `$ref` naming a
+  non-object (`{"$defs":{"x":"hi"},"$ref":"#/$defs/x"}` — valid
+  JSON, malformed schema — reached an `unreachable!()`).
+  `unit::convert_with` wrote its result positionally, so an
+  authored `1e2000000000` asked for a two-gigabyte string; the
+  exponent is bounded at 4096, beyond which the result is the
+  `Inexact` case the enum already documents as outside the exact
+  range. `json::segments` had no cap while `insert` descends one
+  stack frame per namepath segment, so a 60 KB `.daiv` line
+  overflowed the stack — through *every* exporter, since they all
+  funnel into `json::tree`. And Avro's DEFLATE decoder grew its
+  output with no ceiling, expanding under 400 KB of crafted input
+  past 64 MiB.
+- **A library path is validated against the spec's
+  `library-path` grammar before it becomes a path component.**
+  `PathBuf::push` with an absolute operand replaces the base
+  outright, so a document's `.!types` could name any file on the
+  host and have it read. The artifact's own identity check
+  refused the *content* afterwards, but the read happened.
+- **Network fetches take a 30-second timeout**, so an unreachable
+  registry fails resolution instead of hanging the build.
+
+### Changed
+
+- **The error types implement `std::error::Error`** —
+  `PipelineError`, `AppErrorAt`, `LexErrorAt`, `AppError` and
+  `LexError` — so `?` into `Box<dyn Error>` / `anyhow` works and
+  `source()` chains down to the spec error.
+- **`PipelineError::App` carries an `AppErrorAt`** rather than a
+  bare `AppError` (breaking), matching the `Lex` variant. The
+  type could not express a site before, so kaiv-lsp reported
+  every application error at line 0; its `app_diag` is now wired
+  in and they land on their line with their context.
+  `PipelineError::app` constructs the site-less case, `From`
+  covers the rest, and the new `name()` reports the spec error
+  behind a failure.
+- **`LexError`, `AppError` and `PipelineError` are
+  `#[non_exhaustive]`** (breaking for exhaustive matches). The
+  catalog is complete against SPEC.md today — a new test pins all
+  36 names — but Level 4 is unimplemented, and without this every
+  future spec error would be a major bump.
+- **The collation backends are additive** (breaking): enabling
+  both is legal and resolves to ICU. Cargo features are additive
+  by definition, so the old `compile_error!` was a build failure
+  that unrelated crates in one graph could inflict on each other
+  with no recourse — and it forced kaiv-wasm out of the workspace
+  default set, where it now returns. `--all-features` builds for
+  the first time.
+- **`net` leaves the default feature set** (breaking): a parsing
+  library should not reach the network unless asked, and it
+  carried the whole TLS stack. `kaiv-cli` enables it explicitly.
+  The `collation` alias from 0.3/0.4 is gone.
+- **`rex`, `table` and `b64` are private** (breaking), along with
+  `resolve::resolve_named` — the constraint-matching engine, the
+  table-header parser and a base64 helper, none with a consumer
+  inside or outside this workspace. `Resolver::config` is private
+  behind `config()`: the caches are keyed on decisions that field
+  already made, so swapping it mid-flight was silently ignored
+  for everything already resolved.
+- `Debug` on `Doc`, `View`, `Resolver`, `CompiledSchema`,
+  `SchemaField`, `Convert` and `Head`.
+
+### Added
+
+- **Crate-level documentation with runnable examples**, and
+  `#![warn(missing_docs)]` with every public item documented.
+  `#![forbid(unsafe_code)]` locks in a property the crate already
+  had.
+- **CI** (`.gitlab-ci.yml`): fmt, clippy with `-D warnings`, the
+  conformance tree, a feature matrix, the MSRV, the wasm target,
+  docs, and packaging dry-runs.
+- `Cargo.lock` is committed, as it should be for a workspace that
+  ships binaries.
+- `kaiv-lsp` ships its license files and a `homepage`.
 
 [0.11.0] - 2026-08-01
 ---------------------

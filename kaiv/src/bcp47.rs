@@ -53,15 +53,13 @@ pub(crate) fn well_formed(tag: &str) -> bool {
     }
     // region = 2ALPHA / 3DIGIT
     if i < subs.len()
-        && ((subs[i].len() == 2 && alpha(subs[i]))
-            || (subs[i].len() == 3 && digit(subs[i])))
+        && ((subs[i].len() == 2 && alpha(subs[i])) || (subs[i].len() == 3 && digit(subs[i])))
     {
         i += 1;
     }
     // variant = 5*8alphanum / (DIGIT 3alphanum)
     while i < subs.len()
-        && (subs[i].len() >= 5
-            || (subs[i].len() == 4 && subs[i].as_bytes()[0].is_ascii_digit()))
+        && (subs[i].len() >= 5 || (subs[i].len() == 4 && subs[i].as_bytes()[0].is_ascii_digit()))
     {
         i += 1;
     }

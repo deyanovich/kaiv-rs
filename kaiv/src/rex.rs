@@ -127,11 +127,29 @@ impl Regex {
                     _ => false,
                 };
                 if hit {
-                    add_thread(&mut nlist, &mut stack, &mut seen, gen, prog, pc + 1, pos + 1, len);
+                    add_thread(
+                        &mut nlist,
+                        &mut stack,
+                        &mut seen,
+                        gen,
+                        prog,
+                        pc + 1,
+                        pos + 1,
+                        len,
+                    );
                 }
             }
             // Unanchored: a match may also begin at the next position.
-            add_thread(&mut nlist, &mut stack, &mut seen, gen, prog, 0, pos + 1, len);
+            add_thread(
+                &mut nlist,
+                &mut stack,
+                &mut seen,
+                gen,
+                prog,
+                0,
+                pos + 1,
+                len,
+            );
             std::mem::swap(&mut clist, &mut nlist);
         }
         false
@@ -501,7 +519,15 @@ mod tests {
         assert!(re.is_match(" ~ printable"));
         assert!(!re.is_match("caf\u{e9}"));
         // Truncated, non-hex, or beyond ASCII: outside the dialect.
-        for p in [r"\x", r"\x2", r"\xzz", r"\x80", r"[\x80]", r"[a\x]", r"^[\x20-\xff]$"] {
+        for p in [
+            r"\x",
+            r"\x2",
+            r"\xzz",
+            r"\x80",
+            r"[\x80]",
+            r"[a\x]",
+            r"^[\x20-\xff]$",
+        ] {
             assert!(Regex::new(p).is_none(), "{p} must be rejected");
         }
     }
@@ -569,7 +595,9 @@ mod tests {
     fn long_inputs_match_without_overflow_or_blowup() {
         // A long value under `+` must MATCH (no false negative) and must
         // not overflow the stack — the whole point of the NFA rewrite.
-        assert!(Regex::new("^[0-9]+$").unwrap().is_match(&"9".repeat(500_000)));
+        assert!(Regex::new("^[0-9]+$")
+            .unwrap()
+            .is_match(&"9".repeat(500_000)));
         assert!(Regex::new("^[A-Za-z0-9+/]*={0,2}$")
             .unwrap()
             .is_match(&"a".repeat(200)));

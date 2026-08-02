@@ -34,6 +34,11 @@ fn err(msg: impl Into<String>) -> PipelineError {
     PipelineError::Other(msg.into())
 }
 
+/// Convert a Protocol Buffers wire message to authored `.kaiv`.
+///
+/// The wire format is not self-describing, so `schema` is the
+/// `.proto` text and `message` names which message to decode
+/// (the first one defined, when `None`).
 pub fn import(input: &[u8], schema: &str, message: Option<&str>) -> Result<String, PipelineError> {
     let reg = parse_proto(schema)?;
     let mi = pick_message(&reg, message)?;
@@ -43,6 +48,8 @@ pub fn import(input: &[u8], schema: &str, message: Option<&str>) -> Result<Strin
     json::import_val(&members, false)
 }
 
+/// Convert a canonical `.raiv` / `.daiv` to a Protocol Buffers
+/// wire message, against the same `.proto` schema.
 pub fn export(
     canonical: &str,
     schema: &str,
@@ -53,7 +60,7 @@ pub fn export(
 
 /// Type-resolving export: [`export`] with custom heads interpreted
 /// through the resolver / the declared schema (see
-/// [`json::export_with`](crate::json::export_with)).
+/// [`crate::json::export_with`]).
 pub fn export_with(
     canonical: &str,
     schema: &str,
@@ -1645,7 +1652,9 @@ mod tests {
         assert!(saiv.contains("&bin\nblob?=\n"));
         assert!(saiv.contains("/@tags;=\n"));
         assert!(saiv.contains("!int[-9223372036854775808,9223372036854775807]\n/@counts;=\n"));
-        assert!(saiv.contains("!null|int[-9223372036854775808,9223372036854775807]\n/limits::rps?=\n"));
+        assert!(
+            saiv.contains("!null|int[-9223372036854775808,9223372036854775807]\n/limits::rps?=\n")
+        );
         assert!(saiv.contains("!map<int>\nquotas?=\n"));
         assert!(saiv.contains("!null|int|str{LOW,MID,HIGH}\nlevel?=\n"));
         assert!(saiv.contains("!null|int[-2147483648,2147483647]\ndelta?=\n"));
@@ -1660,19 +1669,19 @@ mod tests {
         let sc = crate::parse_csaiv(&csaiv).unwrap();
         let r = crate::Resolver::offline();
         r.preload("acme/config", "csaiv", csaiv.into_bytes());
-        let authored = import(&sample(), SCHEMA, None)
-            .unwrap()
-            .replacen(".!kaiv\n", ".!kaiv\n.!schema:acme/config\n", 1);
+        let authored = import(&sample(), SCHEMA, None).unwrap().replacen(
+            ".!kaiv\n",
+            ".!kaiv\n.!schema:acme/config\n",
+            1,
+        );
         let raiv = crate::compile(authored.as_bytes()).unwrap();
         let daiv = crate::denorm::denormalize_with(&raiv, &r).unwrap();
         assert_eq!(crate::validate(&daiv, &sc).map_err(|e| e.error), Ok(()));
         // The wire ranges are enforced (host materialized so the
         // strict-lockstep scan reaches the port constraint).
         assert_eq!(
-            crate::validate(
-                ".!daiv\n!str'::host=\n!int'::port=99999999999\n",
-                &sc
-            ).map_err(|e| e.error),
+            crate::validate(".!daiv\n!str'::host=\n!int'::port=99999999999\n", &sc)
+                .map_err(|e| e.error),
             Err(crate::AppError::ConstraintViolation)
         );
     }
