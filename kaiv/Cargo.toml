@@ -3,7 +3,7 @@ name = "kaiv"
 # 0.2.0: complete rewrite. 0.1.0 was the Era 1 "kv format" CLI tool;
 # this is the library-only reference implementation of the current
 # kaiv format (Levels 0-2), with the CLI split into `kaiv-cli`.
-version = "0.12.0"
+version = "0.12.1"
 edition = "2021"
 rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ authors = ["Bojan Đuričković"]
 description = "Reference implementation of the kaiv format (Levels 0-3): lexer, compiler, denormalizer, schema compiler, validator"
 keywords = ["kaiv", "configuration", "schema", "validation", "serialization"]
 categories = ["parser-implementations", "encoding", "config", "data-structures"]
-readme = "../README.md"
+readme = "README.md"
 homepage = "https://kaiv.io/"
 documentation = "https://docs.rs/kaiv"
 # The conformance runner needs the spec repo checked out as a

@@ -8,6 +8,28 @@ but note that pre-1.0 releases may not adhere strictly to all
 guidelines. One entry covers the whole workspace; where the crates'
 versions differ, the entry names them.
 
+[0.12.1] - 2026-08-02
+---------------------
+
+Versions in this entry: `kaiv` 0.12.1. `kaiv-cli`, `kaiv-lsp` and
+`kaiv-wasm` are unchanged.
+
+### Fixed
+
+- **The `kaiv` crate ships its own README.** It pointed at the
+  workspace one, so crates.io rendered "kaiv-rs — a cargo
+  workspace with four crates" on the library's page: the wrong
+  title, describing binaries the crate does not contain, and
+  telling readers to run tests from a workspace root they do not
+  have. The library now has a library README — what it is, the
+  pipeline with a worked example, the converter and feature
+  matrix, and the stability and MSRV statement. Both of its code
+  examples are exercised by the test suite.
+
+  0.12.0 keeps the wrong README on its own version page, which
+  crates.io does not allow editing after publication; the crate
+  page itself renders the latest version and is corrected.
+
 [0.12.0] - 2026-08-01
 ---------------------
 
