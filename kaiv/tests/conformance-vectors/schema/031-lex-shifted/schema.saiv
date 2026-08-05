@@ -1,0 +1,11 @@
+.!saiv acme/shops
+
+// -u-ka-shifted makes punctuation ignorable at the pinned
+// tertiary strength (SPEC.md section 5.3), so co-op is
+// enum-equal to coop; the default non-ignorable handling on the
+// sibling field keeps the hyphen significant.
+..lex[en-u-ka-shifted] {coop,mart}
+shop=
+
+..lex[en] {coop,mart}
+plain=

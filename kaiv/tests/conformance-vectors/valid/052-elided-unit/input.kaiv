@@ -1,0 +1,8 @@
+.!kaiv
+.!schema:acme/elide
+
+!:km
+dist=42.5
+
+!:h
+extra=2

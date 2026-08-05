@@ -1,6 +1,6 @@
 [package]
 name = "kaiv-cli"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 rust-version = "1.85.0"
 license = "MIT OR Apache-2.0"
@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 # `net` is opt-in for the library but intrinsic to the CLI: registry
 # resolution is what `kaiv validate` does against a hosted schema.
-kaiv = { path = "../kaiv", version = "0.12.0", features = ["net", "json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
+kaiv = { path = "../kaiv", version = "0.13.0", features = ["net", "json", "yaml", "toml", "xml", "cbor", "avro", "proto", "asn1", "graphql", "xsd"] }
 # Already in the tree via kaiv's `net` feature; declared here so the
 # login flow (account.rs) can drive it directly.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }

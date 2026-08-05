@@ -28,6 +28,12 @@ pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
     crate::lexer::expect_kind(raiv, "raiv").map_err(PipelineError::Lex)?;
     let mut table: HashMap<String, String> = HashMap::new();
     let mut out = String::new();
+    // `.!verbatim` carried in the `.raiv` header: no `$$` collapse,
+    // no reference expansion, and the declaration itself is
+    // discharged — it does not survive into `.daiv` (SPEC.md
+    // § Verbatim Documents).
+    let mut verbatim = false;
+    let mut seen_data = false;
     for line in raiv.split_inclusive('\n') {
         let body = line.trim_end_matches(['\n', '\r']);
         let eol = &line[body.len()..];
@@ -35,6 +41,24 @@ pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
             out.push_str(".!daiv");
             out.push_str(eol);
             continue;
+        }
+        if let Some(rest) = body
+            .trim_start_matches([' ', '\t'])
+            .strip_prefix(".!verbatim")
+        {
+            // Keyword boundary: the bare keyword or keyword-then-
+            // whitespace is this declaration; a longer word (e.g.
+            // `.!verbatimfoo`) is some other line.
+            if rest.is_empty() || rest.starts_with([' ', '\t']) {
+                // No arguments, at most once, before any data line —
+                // misuse is a VerbatimContextError, like the
+                // Compiler's.
+                if !rest.trim_matches([' ', '\t']).is_empty() || verbatim || seen_data {
+                    return Err(PipelineError::app(AppError::VerbatimContext));
+                }
+                verbatim = true;
+                continue; // discharged, not emitted
+            }
         }
         // Comments and declarations are not data lines: they neither
         // define references nor undergo `$`-resolution (a `$` inside a
@@ -47,7 +71,12 @@ pub fn denormalize(raiv: &str) -> Result<String, PipelineError> {
                     let eq = tick + eq_rel;
                     let namepath = &body[tick + 1..eq];
                     let value = &body[eq + 1..];
-                    let resolved = resolve_value(value, &table)?;
+                    seen_data = true;
+                    let resolved = if verbatim {
+                        value.to_string()
+                    } else {
+                        resolve_value(value, &table)?
+                    };
                     table.insert(namepath.to_string(), resolved.clone());
                     out.push_str(&body[..eq + 1]);
                     out.push_str(&resolved);

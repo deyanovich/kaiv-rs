@@ -1,0 +1,5 @@
+.!daiv
+!str'/@items/0::key=k1
+!str'/@items/0::label=a
+!str'/@items/1::key=
+!str'/@items/1::label=b

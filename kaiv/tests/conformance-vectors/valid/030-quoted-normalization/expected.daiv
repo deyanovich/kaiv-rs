@@ -1,0 +1,5 @@
+.!daiv
+!str'::host=a
+!str'::"a b"=b
+!str'::re=c
+!str'/srv::port=1

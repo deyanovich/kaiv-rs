@@ -1,0 +1,4 @@
+.!kaiv
+
+/registries::x509=./schemas
+/registries::crypto=./schemas

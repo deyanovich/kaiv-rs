@@ -1,0 +1,6 @@
+.!saiv acme/menu
+
+// Collation governs equality as well as order (SPEC.md section
+// 5.3): enum membership under fr collation is collation-equality.
+..lex[fr] {café,thé}
+boisson=

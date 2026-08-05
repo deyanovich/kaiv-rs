@@ -1,0 +1,7 @@
+.!saiv 99 acme/future
+
+// A digit-first first token is the version slot; a well-formed
+// major other than 1 is UNSUPPORTED_VERSION_ERROR, never an
+// identity misread.
+!str
+host=

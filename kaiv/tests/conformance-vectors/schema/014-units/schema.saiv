@@ -1,0 +1,7 @@
+.!saiv acme/measures
+!float:km
+dist=
+!b64#[16,16]
+key=
+!b64#{16,24,32}
+aes?=AAAAAAAAAAAAAAAAAAAAAA

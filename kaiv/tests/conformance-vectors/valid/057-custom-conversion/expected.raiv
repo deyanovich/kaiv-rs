@@ -1,0 +1,5 @@
+.!raiv
+.!schema:astro/probe
+.!units astro/units
+!float:au'/probe::dist=2
+!float:au/s'/probe::speed=0.0001

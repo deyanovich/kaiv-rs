@@ -1,0 +1,2 @@
+.!csaiv acme/produits
+!acme/catalogue/nom_produit /^.{1,200}$/ ..lex[fr-CA] [Arbre,Mangue]'::nom=

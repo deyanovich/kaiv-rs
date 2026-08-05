@@ -1,0 +1,6 @@
+.!daiv
+!str'/server/api::host=localhost
+!str'/server/api::ssl=true
+!str'/server/backup::host=localhost
+!str'/server/backup::ssl=true
+!str'/server/backup::port=9091

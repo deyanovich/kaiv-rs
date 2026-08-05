@@ -1,0 +1,12 @@
+.!saiv acme/adressbuch
+
+// -u-co-phonebk selects the German phonebook tailoring (the
+// spec's own worked example, SPEC.md section 5.3): o-umlaut
+// collates as oe, landing Köln inside [Koe,Kof]. Under standard
+// de-DE the umlaut is a secondary difference on o, so Köln
+// collates like Koln -- past Kof.
+..lex[de-DE-u-co-phonebk] [Koe,Kof]
+stadt=
+
+..lex[de-DE] [Koe,Kof]
+standard=

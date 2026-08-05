@@ -1,0 +1,5 @@
+.!kaiv
+/server/api::host=localhost
+/server/api::port=8080
+/server/backup::host=$server/api::host
+/server/backup::port=9090

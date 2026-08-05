@@ -83,6 +83,13 @@ struct Compiler<'r> {
     custom_aliases: Option<std::collections::BTreeMap<String, String>>,
     /// `.!registry` Layer 1 overrides (prefix → base).
     registries: Vec<(String, String)>,
+    /// `.!verbatim` declared: values are fully verbatim — no `$$`
+    /// doubling, no references — and the variable machinery is a
+    /// VerbatimContextError (SPEC.md § Verbatim Documents).
+    verbatim: bool,
+    /// A content-bearing line has been compiled — `.!verbatim` may
+    /// no longer appear (declarations precede content).
+    content_seen: bool,
     out: Vec<String>,
     /// Scoped `.!schema:/ns ID` declarations collected from block
     /// annotations (D-10) — the discriminants, inserted into the
@@ -350,14 +357,11 @@ fn valid_provenance_list(s: &str) -> bool {
             && b.iter()
                 .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
     };
-    let ts_ok = |t: &str| {
-        let b = t.as_bytes();
-        b.len() == 16
-            && b[..8].iter().all(u8::is_ascii_digit)
-            && b[8] == b'T'
-            && b[9..15].iter().all(u8::is_ascii_digit)
-            && b[15] == b'Z'
-    };
+    // Both instant forms: the canonical dashed extended one and
+    // the deprecated compact basic one, which is accepted through
+    // the 1.0-draft series and canonicalized away on emission
+    // (SPEC.md § Provenance).
+    let ts_ok = crate::anno::valid_instant;
     let prov_ok = |mut p: &str| {
         // Peel the optional `#dpid` then the optional `@timestamp`
         // (right to left; a prov-ident admits neither `@` nor `#`).
@@ -441,6 +445,8 @@ impl<'r> Compiler<'r> {
             custom_units: None,
             custom_aliases: None,
             registries: Vec::new(),
+            verbatim: false,
+            content_seen: false,
             out: Vec::new(),
             scoped_schemas: Vec::new(),
             pending_anno: None,
@@ -498,6 +504,17 @@ impl<'r> Compiler<'r> {
                     if !lib.is_empty() {
                         self.unit_imports.push(lib.to_string());
                     }
+                } else if let Some(rest) = s.strip_prefix(".!verbatim") {
+                    // No arguments, at most once, before any content
+                    // (SPEC.md § Verbatim Documents). Carried into
+                    // .raiv via the pass-through below.
+                    if !rest.trim_matches([' ', '\t']).is_empty()
+                        || self.verbatim
+                        || self.content_seen
+                    {
+                        return Err(PipelineError::app(AppError::VerbatimContext));
+                    }
+                    self.verbatim = true;
                 } else if let Some(rest) = s.strip_prefix(".!registry") {
                     if let Some((p, b)) = rest.trim_matches([' ', '\t']).split_once('=') {
                         self.registries.push((p.to_string(), b.to_string()));
@@ -506,23 +523,38 @@ impl<'r> Compiler<'r> {
                 self.out.push((*s).to_string());
                 Ok(())
             }
-            LineKind::Meta(s) => self.meta(s),
-            LineKind::SectionOpen(inner) => self.section_open(inner),
+            LineKind::Meta(s) => {
+                self.content_seen = true;
+                self.meta(s)
+            }
+            LineKind::SectionOpen(inner) => {
+                self.content_seen = true;
+                self.section_open(inner)
+            }
             LineKind::SectionClose => {
                 if matches!(self.blocks.last(), Some(Block::Array { .. })) {
                     self.blocks.pop();
                 }
                 Ok(())
             }
-            LineKind::NsOpen(inner) => self.ns_open(inner),
+            LineKind::NsOpen(inner) => {
+                self.content_seen = true;
+                self.ns_open(inner)
+            }
             LineKind::NsClose => {
                 if matches!(self.blocks.last(), Some(Block::Ns { .. })) {
                     self.blocks.pop();
                 }
                 Ok(())
             }
-            LineKind::Content { left, value } => self.content(left, value),
-            LineKind::VarSplat(name) => self.var_splat(name),
+            LineKind::Content { left, value } => {
+                self.content_seen = true;
+                self.content(left, value)
+            }
+            LineKind::VarSplat(name) => {
+                self.content_seen = true;
+                self.var_splat(name)
+            }
         }
     }
 
@@ -532,6 +564,11 @@ impl<'r> Compiler<'r> {
     /// § Namespace-Variable Splat) — elsewhere the splat has no
     /// target namespace and is a VariableContextError.
     fn var_splat(&mut self, name: &str) -> Result<(), PipelineError> {
+        // A splat line is machinery use — banned in a verbatim
+        // document (SPEC.md § Verbatim Documents).
+        if self.verbatim {
+            return Err(PipelineError::app(AppError::VerbatimContext));
+        }
         if self.blocks.is_empty() {
             return Err(PipelineError::app(AppError::VariableContext));
         }
@@ -746,6 +783,18 @@ impl<'r> Compiler<'r> {
             }));
         }
         match parse_left(left) {
+            // The variable machinery is banned positionally in a
+            // verbatim document (SPEC.md § Verbatim Documents) — a
+            // definition of any shape is a contradiction with the
+            // declaration, surfaced rather than left dead.
+            Left::VarScalar(_)
+            | Left::VarArrayAppend(_)
+            | Left::VarArrayExtend(_)
+            | Left::VarNs(_)
+                if self.verbatim =>
+            {
+                Err(PipelineError::app(AppError::VerbatimContext))
+            }
             Left::VarScalar(name) => {
                 // A scalar variable stores its *literal* value; the
                 // single escape happens when it is substituted.
@@ -844,11 +893,20 @@ impl<'r> Compiler<'r> {
     /// variable's elements; anything else is one resolved value.
     fn splice_or_single(&self, value: &str) -> Result<Vec<String>, PipelineError> {
         if let Some(name) = value.strip_prefix("$@.") {
-            return self
-                .array_vars
-                .get(name)
-                .cloned()
-                .ok_or(PipelineError::app(AppError::UndefinedReference));
+            // In a verbatim document only the exact whole-value
+            // splice shape is the banned position; anything else is
+            // literal bytes (SPEC.md § Verbatim Documents).
+            if self.verbatim {
+                if !name.is_empty() && ident_len(name.as_bytes()) == name.len() {
+                    return Err(PipelineError::app(AppError::VerbatimContext));
+                }
+            } else {
+                return self
+                    .array_vars
+                    .get(name)
+                    .cloned()
+                    .ok_or(PipelineError::app(AppError::UndefinedReference));
+            }
         }
         Ok(vec![self.resolve_value(value)?])
     }
@@ -909,11 +967,20 @@ impl<'r> Compiler<'r> {
     /// Struct-assignment right side → resolved (field, value) pairs.
     fn parse_pairs(&mut self, value: &str) -> Result<Vec<(String, String)>, PipelineError> {
         if let Some(name) = value.strip_prefix("$/.") {
-            return self
-                .ns_vars
-                .get(name)
-                .cloned()
-                .ok_or(PipelineError::app(AppError::UndefinedReference));
+            // Same whole-value rule as splice_or_single: in a
+            // verbatim document the exact splice shape is banned;
+            // anything else falls through to ordinary pair parsing.
+            if self.verbatim {
+                if !name.is_empty() && ident_len(name.as_bytes()) == name.len() {
+                    return Err(PipelineError::app(AppError::VerbatimContext));
+                }
+            } else {
+                return self
+                    .ns_vars
+                    .get(name)
+                    .cloned()
+                    .ok_or(PipelineError::app(AppError::UndefinedReference));
+            }
         }
         let mut pairs = Vec::new();
         for pair in value.split('|') {
@@ -977,6 +1044,12 @@ impl<'r> Compiler<'r> {
     /// the Denormalizer to inline. A lone `$` that forms no valid
     /// reference is an error — literal dollars are written `$$`.
     fn resolve_value(&self, value: &str) -> Result<String, PipelineError> {
+        // A verbatim document has no reference machinery: the value
+        // is the value, every `$` literal (SPEC.md § Verbatim
+        // Documents).
+        if self.verbatim {
+            return Ok(value.to_string());
+        }
         // Container references in a scalar position have no text
         // representation to substitute — VariableContextError
         // (SPEC.md § Namespace-Variable Splat). Splice positions go
@@ -1287,9 +1360,37 @@ fn render_prefix_for(a: &Annotation, prov: Option<&str>) -> String {
     }
     if let Some(p) = prov.map(str::to_string).or_else(|| a.provenance.clone()) {
         s.push('?');
-        s.push_str(&p);
+        // Canonicalize each entry's instant on the way out, the way
+        // the unit above canonicalizes: a deprecated compact instant
+        // is accepted on input and never survives into canonical
+        // output (SPEC.md § Provenance).
+        s.push_str(&canonical_provenance(&p));
     }
     s
+}
+
+/// Rewrite every instant in a provenance list into its canonical
+/// dashed form, leaving ids and data-point identifiers alone.
+fn canonical_provenance(list: &str) -> String {
+    list.split(',')
+        .map(|entry| {
+            // `id ["@" instant] ["#" dpid]` — peel the dpid first,
+            // since an instant admits neither separator.
+            let (head, dpid) = match entry.rsplit_once('#') {
+                Some((h, d)) => (h, Some(d)),
+                None => (entry, None),
+            };
+            let head = match head.split_once('@') {
+                Some((id, ts)) => format!("{id}@{}", crate::anno::canonical_instant(ts)),
+                None => head.to_string(),
+            };
+            match dpid {
+                Some(d) => format!("{head}#{d}"),
+                None => head,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn render_constraint(c: &Constraint) -> String {
@@ -1427,6 +1528,80 @@ mod tests {
     }
 
     #[test]
+    fn verbatim_documents_take_dollars_literally() {
+        // `.!verbatim` (SPEC.md § Verbatim Documents): every `$` in
+        // a value is literal — no doubling, no references — and the
+        // declaration survives into .raiv but not .daiv.
+        let raiv = crate::compile(b".!kaiv 1\n.!verbatim\nprice=$5\npattern=^abc$\n").unwrap();
+        assert!(raiv.contains(".!verbatim\n"), "{raiv}");
+        assert!(raiv.contains("!str'::price=$5\n"), "{raiv}");
+        let daiv = crate::denorm::denormalize(&raiv).unwrap();
+        assert!(!daiv.contains(".!verbatim"), "must discharge: {daiv}");
+        assert!(daiv.contains("!str'::price=$5\n"), "{daiv}");
+        assert!(daiv.contains("!str'::pattern=^abc$\n"), "{daiv}");
+        // Byte-identical .daiv to the escaped-authored equivalent.
+        let escaped = build(".!kaiv 1\nprice=$$5\npattern=^abc$$\n");
+        assert_eq!(daiv, escaped);
+
+        // `$$` is two literal dollars in a verbatim document.
+        let d = build(".!kaiv 1\n.!verbatim\nsep=$$\n");
+        assert!(d.contains("!str'::sep=$$\n"), "{d}");
+        // Mid-value machinery lookalikes are bytes, not errors.
+        let d = build(".!kaiv 1\n.!verbatim\nnote=see $@.other and $/.tpl\n");
+        assert!(d.contains("!str'::note=see $@.other and $/.tpl\n"), "{d}");
+    }
+
+    #[test]
+    fn verbatim_bans_the_machinery_positionally() {
+        let err = |src: &str| match crate::compile(src.as_bytes()) {
+            Err(PipelineError::App(e)) => e.error,
+            other => panic!("expected app error, got {other:?}"),
+        };
+        // Class 1: variable definitions of every shape.
+        assert_eq!(err(".!verbatim\n.x=1\n"), AppError::VerbatimContext);
+        assert_eq!(err(".!verbatim\n@.a+=x\n"), AppError::VerbatimContext);
+        assert_eq!(err(".!verbatim\n@.a;=x;y\n"), AppError::VerbatimContext);
+        assert_eq!(err(".!verbatim\n/.t:=a=1\n"), AppError::VerbatimContext);
+        // Class 2: the standalone splat line.
+        assert_eq!(
+            err(".!verbatim\n(/ns)\n$/.t\n()\n"),
+            AppError::VerbatimContext
+        );
+        // Class 3: whole-value splices.
+        assert_eq!(err(".!verbatim\n/@a;=$@.t\n"), AppError::VerbatimContext);
+        assert_eq!(err(".!verbatim\n/ns:=$/.t\n"), AppError::VerbatimContext);
+        // Misuse of the declaration itself: arguments, a repeat, or
+        // a position after content.
+        assert_eq!(err(".!verbatim extra\n"), AppError::VerbatimContext);
+        assert_eq!(err(".!verbatim\n.!verbatim\n"), AppError::VerbatimContext);
+        assert_eq!(err("a=1\n.!verbatim\n"), AppError::VerbatimContext);
+    }
+
+    #[test]
+    fn verbatim_raiv_is_consumed_without_collapse() {
+        // Hand-crafted `.raiv` carrying the declaration: values pass
+        // through with no `$$` collapse and no reference lookup.
+        let daiv = crate::denorm::denormalize(
+            ".!raiv\n.!verbatim\n!str'::a=$$x\n!str'::b=$undefined\n",
+        )
+        .unwrap();
+        assert_eq!(daiv, ".!daiv\n!str'::a=$$x\n!str'::b=$undefined\n");
+        // Misuse in canonical input errors like the Compiler's.
+        for bad in [
+            ".!raiv\n!str'::a=1\n.!verbatim\n",
+            ".!raiv\n.!verbatim\n.!verbatim\n",
+            ".!raiv\n.!verbatim x\n",
+        ] {
+            match crate::denorm::denormalize(bad) {
+                Err(PipelineError::App(e)) => {
+                    assert_eq!(e.error, AppError::VerbatimContext)
+                }
+                other => panic!("{bad:?} -> {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn map_keys_and_shebang() {
         // Non-bare map keys are quoted; a bare key stays bare.
         let d = build(".!kaiv 1\n!map<int>\np=api:1;my key:2\n");
@@ -1503,11 +1678,22 @@ mod tests {
         assert!(crate::compile(b".!kaiv 1\n?bad src\nx=1\n").is_err());
         assert!(crate::compile(b".!kaiv 1\n?src'oops\nx=1\n").is_err());
         assert!(crate::compile(b".!kaiv 1\n?a,b#=c\nx=1\n").is_err());
-        let ok = crate::compile(b".!kaiv 1\n?sensor1@20250115T093000Z#req-42\ntemp=100\n").unwrap();
+        // The canonical instant is the dashed extended form; the
+        // compact one is accepted on input and canonicalized away
+        // (SPEC.md § Provenance, deprecated until 1.0).
+        let ok =
+            crate::compile(b".!kaiv 1\n?sensor1@2025-01-15T09:30:00Z#req-42\ntemp=100\n").unwrap();
         assert!(
-            ok.contains("?sensor1@20250115T093000Z#req-42'::temp=100"),
+            ok.contains("?sensor1@2025-01-15T09:30:00Z#req-42'::temp=100"),
             "{ok}"
         );
+        // The deprecated compact form parses and canonicalizes.
+        let from_compact =
+            crate::compile(b".!kaiv 1\n?sensor1@20250115T093000Z#req-42\ntemp=100\n").unwrap();
+        assert_eq!(ok, from_compact, "compact must canonicalize to dashed");
+        // A malformed instant in either shape is still rejected.
+        assert!(crate::compile(b".!kaiv 1\n?s@2025-01-15T09:30:00\nx=1\n").is_err());
+        assert!(crate::compile(b".!kaiv 1\n?s@20250115T0930Z\nx=1\n").is_err());
     }
 
     #[test]

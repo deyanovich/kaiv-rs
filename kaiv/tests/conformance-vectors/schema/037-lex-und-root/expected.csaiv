@@ -1,0 +1,2 @@
+.!csaiv acme/root
+/^.{1,100}$/ ..lex[und] [apple,cherry]'::fruit=

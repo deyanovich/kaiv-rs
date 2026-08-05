@@ -1,0 +1,6 @@
+.!daiv
+!str'::name=eu1
+!str'/@servers/0::host=a
+!int'/@servers/0::port=1
+!str'/@servers/0::role=
+!str'/@servers/0::extra=x

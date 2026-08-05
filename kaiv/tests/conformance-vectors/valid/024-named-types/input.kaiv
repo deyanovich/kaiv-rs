@@ -1,0 +1,6 @@
+.!kaiv
+.!types acme/net
+&port
+gateway=8080
+&label
+host=web-01

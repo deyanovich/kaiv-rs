@@ -1,0 +1,6 @@
+.!saiv acme/names
+
+// \x27 names the apostrophe — the one character a pattern body
+// cannot carry literally (it is the line's metadata delimiter).
+/^[A-Za-z\x27-]+$/
+surname=

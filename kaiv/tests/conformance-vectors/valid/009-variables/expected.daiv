@@ -1,0 +1,5 @@
+.!daiv
+!str'/server/api::host=localhost
+!str'/server/api::ssl=true
+!str'/server/api::port=8080
+!str'/server/api::timeout=30

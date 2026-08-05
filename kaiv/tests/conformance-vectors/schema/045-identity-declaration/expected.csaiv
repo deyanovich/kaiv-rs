@@ -1,0 +1,4 @@
+.!csaiv acme/intent
+!str'::locked=
+/^[a-z0-9]+$/'::loose=
+/^/'::free=

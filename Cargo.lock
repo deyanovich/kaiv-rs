@@ -363,7 +363,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kaiv"
-version = "0.12.1"
+version = "0.13.0"
 dependencies = [
  "colligo",
  "icu_collator",
@@ -377,7 +377,7 @@ dependencies = [
 
 [[package]]
 name = "kaiv-cli"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "kaiv",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "kaiv-wasm"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "blake3",
  "kaiv",

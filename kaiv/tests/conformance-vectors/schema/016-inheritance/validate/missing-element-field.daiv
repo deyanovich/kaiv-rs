@@ -1,0 +1,9 @@
+.!daiv
+!str'::host=a
+!int'::port=8443
+!str'::timeout_ms=500
+!str'/upstream::host=b
+!int'/upstream::port=80
+!str'/upstream::timeout_ms=500
+!str'/@mirrors/0::host=m1
+!str'::name=gw

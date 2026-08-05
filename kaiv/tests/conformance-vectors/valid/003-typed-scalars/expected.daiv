@@ -1,0 +1,4 @@
+.!daiv
+!int'::port=8080
+!bool'::active=true
+!float'::ratio=0.5

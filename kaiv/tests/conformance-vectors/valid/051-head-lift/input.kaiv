@@ -1,0 +1,6 @@
+.!kaiv
+.!schema:acme/lift
+
+host=web1
+port=8080
+dist=42.5

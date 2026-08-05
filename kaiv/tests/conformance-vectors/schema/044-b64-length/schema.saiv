@@ -1,0 +1,7 @@
+.!saiv acme/blob
+
+# An unconstrained binary field: the b64 pattern alone governs,
+# so the impossible mod-4 length class is isolated from any
+# length constraint.
+!b64
+hash=

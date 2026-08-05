@@ -1,0 +1,4 @@
+.!daiv
+!str'/@labels::0=red
+!str'/@labels::1=green
+!str'/@labels::2=blue

@@ -1,0 +1,5 @@
+.!csaiv acme/svc
+!acme/net/port /^-?[0-9]+$/ ..num [1,65535]'::listen?=443
+!acme/net/port /^-?[0-9]+$/ ..num [1,65535]'::admin?=9090
+!acme/net/greeting /^[a-z ]+$/'::motd?=hello world
+/^/'::name=

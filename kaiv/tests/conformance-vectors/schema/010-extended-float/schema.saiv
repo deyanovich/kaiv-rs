@@ -1,0 +1,4 @@
+.!saiv acme/ext
+.!types std/num
+!float|std/num/inf
+x?=0

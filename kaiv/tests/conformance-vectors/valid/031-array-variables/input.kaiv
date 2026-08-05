@@ -1,0 +1,4 @@
+.!kaiv
+@.tags;=red;green
+@.tags+=blue
+/@labels;=$@.tags

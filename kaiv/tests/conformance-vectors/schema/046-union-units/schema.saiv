@@ -1,0 +1,6 @@
+.!saiv acme/trip
+
+# The nullable-quantity pattern (D-11): the unit rides the
+# alternative, never the union.
+!null|float:km
+dist?=

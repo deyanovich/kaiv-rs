@@ -1,0 +1,4 @@
+.!daiv
+!std/num/inf'::ceiling=inf
+!std/num/inf'::floor=-inf
+!std/num/nan'::blank=nan

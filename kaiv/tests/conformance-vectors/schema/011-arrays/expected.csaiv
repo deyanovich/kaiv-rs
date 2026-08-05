@@ -1,0 +1,6 @@
+.!csaiv acme/cluster strict
+!str'::name=
+!int /^-?[0-9]+$/ ..num [1,65535]'/@ports::=
+!str'/@servers/::host=
+!int /^-?[0-9]+$/ ..num'/@servers/::port=
+!str'/@servers/::role?=

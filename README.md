@@ -128,10 +128,18 @@ otherwise; output on stdout, diagnostics on stderr.
 
 ## Conformance
 
-The executable definition of "correct" is the conformance tree in
-the spec repo (`spec/kaiv/conformance/`). `cargo test` runs it from
-`../../spec/kaiv/conformance` (relative to the `kaiv` crate) by
-default; override with `KAIV_CONFORMANCE_DIR`. Level 3 vectors
+The executable definition of "correct" is the conformance tree,
+vendored into this repo at `kaiv/tests/conformance-vectors/` so a
+fresh clone runs it with no sibling checkout, and so a run is
+pinned to an identifiable vector set rather than to whatever a
+neighbouring directory happens to hold. Its `VECTORS` file names
+the spec commit it was copied from.
+
+The spec repo stays authoritative: edit vectors there, then run
+`scripts/refresh-vectors.sh [<spec-repo>]` to re-vendor (it
+refuses if the source tree is dirty, so the recorded commit always
+describes the copy). `KAIV_CONFORMANCE_DIR` still overrides, for
+testing against a working spec checkout before vendoring. Level 3 vectors
 carry a `LEVEL` marker: under the default ICU backend they run as
 written; a build without it substitutes the vector's
 `partial.expected` outcome (the honest-partial rule) or skips the

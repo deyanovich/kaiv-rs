@@ -1,0 +1,5 @@
+.!daiv
+!str'::"Content-Type"=application/json
+!str'/app/"dark-mode"::enabled=true
+!int'/@"x-servers"/0::"retry-count"=3
+!str'::"weird""name"=value with a literal quote in the key

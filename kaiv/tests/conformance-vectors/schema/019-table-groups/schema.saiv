@@ -1,0 +1,13 @@
+.!saiv acme/orders
+
+[/@customers id=!]
+!str
+id=
+[]
+
+[/@orders id=!|customer=/@customers/*::id]
+!str
+id=
+!str
+customer=
+[]

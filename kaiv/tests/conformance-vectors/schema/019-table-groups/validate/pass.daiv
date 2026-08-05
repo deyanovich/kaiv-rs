@@ -1,0 +1,7 @@
+.!daiv
+!str'/@customers/0::id=c1
+!str'/@customers/1::id=c2
+!str'/@orders/0::id=o1
+!str'/@orders/0::customer=c1
+!str'/@orders/1::id=o2
+!str'/@orders/1::customer=c2

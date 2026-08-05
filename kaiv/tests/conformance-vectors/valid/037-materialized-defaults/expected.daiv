@@ -1,0 +1,4 @@
+.!daiv
+.!schema:acme/svc
+!str'::name=eu1
+!int'::listen=443

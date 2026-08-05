@@ -1,0 +1,8 @@
+.!kaiv
+[/@servers]
+host=a
+port=1
+[/@servers]
+host=b
+port=2
+[]

@@ -1,0 +1,5 @@
+.!daiv
+.!schema:astro/probe
+.!units astro/units
+!float:m'/probe::dist=299195741400
+!float:m/s'/probe::speed=14959787.07

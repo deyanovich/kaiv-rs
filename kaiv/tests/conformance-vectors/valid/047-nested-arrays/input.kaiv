@@ -1,0 +1,16 @@
+.!kaiv
+[/@matrix]
+@values+=a
+@values+=b
+[/@matrix]
+@values+=c
+[/@servers]
+host=web-01
+[/@servers/0/@disks]
+dev=sda
+size=500
+[/@servers/0/@disks]
+dev=sdb
+size=250
+[/@cube/0/@planes]
+@points;=1;2

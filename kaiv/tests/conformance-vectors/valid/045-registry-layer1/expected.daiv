@@ -1,0 +1,3 @@
+.!daiv
+.!registry acme=./local
+!acme/net/port'::listen=8080

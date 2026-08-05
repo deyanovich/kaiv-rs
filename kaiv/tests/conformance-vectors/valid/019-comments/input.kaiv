@@ -1,0 +1,5 @@
+.!kaiv
+# a comment
+// doc comment
+host=localhost
+port=8080

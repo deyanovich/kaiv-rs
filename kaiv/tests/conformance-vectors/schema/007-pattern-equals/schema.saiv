@@ -1,0 +1,3 @@
+.!saiv acme/eq
+!str/^a=b$/
+pair=

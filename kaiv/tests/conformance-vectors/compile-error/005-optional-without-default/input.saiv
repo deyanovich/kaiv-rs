@@ -1,0 +1,3 @@
+.!saiv acme/bad
+!int[1,100]
+score?=

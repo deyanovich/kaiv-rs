@@ -1,0 +1,3 @@
+.!daiv
+!str'::msg=hello \n "world" # not a comment // neither
+!str'::path=C:\Users\x

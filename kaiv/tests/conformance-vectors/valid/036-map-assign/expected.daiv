@@ -1,0 +1,3 @@
+.!daiv
+!str'/config/settings::theme=dark
+!str'/config/settings::retries=3

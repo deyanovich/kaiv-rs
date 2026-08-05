@@ -1,0 +1,8 @@
+.!saiv acme/anon
+
+// Anonymous refinement: implicit str narrowed by the items
+/^[a-z]+$/ #[1,8]
+name=
+
+..lex [aa,mm]
+bucket=

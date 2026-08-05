@@ -1,0 +1,4 @@
+.!csaiv acme/lift
+!str'::host=
+!int /^-?[0-9]+$/ ..num [1,65535]'::port=
+!float:km /^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/ ..num'::dist=

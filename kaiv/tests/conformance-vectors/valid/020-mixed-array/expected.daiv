@@ -1,0 +1,4 @@
+.!daiv
+!str'/@items::0=hello
+!str'/@items/1::name=Alice
+!str'/@items::2=42

@@ -7,7 +7,7 @@ converters for a dozen neighbouring formats.
 
 ```toml
 [dependencies]
-kaiv = "0.12"
+kaiv = "0.13"
 ```
 
 ## The pipeline

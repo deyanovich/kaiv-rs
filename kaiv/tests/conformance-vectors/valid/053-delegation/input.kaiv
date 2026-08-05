@@ -1,0 +1,9 @@
+.!kaiv
+.!schema:x509/algo
+
+algorithm=rsa
+
+(/parameters schema:crypto/rsa-params)
+modulus=00ab
+exponent=65537
+()

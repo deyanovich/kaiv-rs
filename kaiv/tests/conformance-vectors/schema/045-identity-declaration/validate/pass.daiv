@@ -1,0 +1,4 @@
+.!daiv
+!str'::locked=ok
+!str'::loose=abc
+!str'::free=anything at all

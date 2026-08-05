@@ -1,0 +1,5 @@
+.!daiv
+!str'/@numbers::0=one
+!str'/@numbers::1=two
+!str'/@numbers::2=three
+!str'/@numbers::3=four

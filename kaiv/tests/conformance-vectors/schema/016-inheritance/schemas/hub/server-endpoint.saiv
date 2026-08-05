@@ -1,0 +1,7 @@
+.!saiv hub/server-endpoint
+!str
+host=
+!int[0,65535]
+port=
+!int[1,3600]
+timeout_ms?=500

@@ -1,0 +1,14 @@
+.!kaiv 1
+
+"Content-Type"=application/json
+
+(/app/"dark-mode")
+enabled=true
+()
+
+[/@"x-servers"]
+!int
+"retry-count"=3
+[]
+
+"weird""name"=value with a literal quote in the key

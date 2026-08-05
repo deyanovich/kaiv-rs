@@ -1,0 +1,4 @@
+.!daiv
+!str'::"server name"=prod-1
+!str'::"weird""name"=x
+!str'::"a=b"=v

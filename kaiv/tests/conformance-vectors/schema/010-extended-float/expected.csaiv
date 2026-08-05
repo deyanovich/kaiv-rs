@@ -1,0 +1,2 @@
+.!csaiv acme/ext
+!float(/^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/..num)|std/num/inf({inf,-inf})'::x?=0

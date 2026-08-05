@@ -1,0 +1,9 @@
+.!taiv acme/net
+
+// TCP port, defaulting to the https port
+!int[1,65535]
+&port=443
+
+// Greeting with a default
+/^[a-z ]+$/
+&greeting=hello world

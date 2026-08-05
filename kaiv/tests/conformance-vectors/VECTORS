@@ -1,0 +1,8 @@
+# Vendored conformance tree — DO NOT EDIT.
+#
+# Copied by scripts/refresh-vectors.sh from the conformance repo,
+# which is authoritative: edit vectors there and re-run the
+# script. This file is what pins a test run to a vector set.
+source: gitlab.com/kaiv-format/conformance
+commit: 6d333f087d81b8481094d91fddca4ba86fe2b68e
+describe: v3

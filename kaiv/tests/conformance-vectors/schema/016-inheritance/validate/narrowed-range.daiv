@@ -1,0 +1,8 @@
+.!daiv
+!str'::host=a
+!int'::port=443
+!str'/upstream::host=b
+!int'/upstream::port=80
+!str'/@mirrors/0::host=m1
+!int'/@mirrors/0::port=9000
+!str'::name=gw

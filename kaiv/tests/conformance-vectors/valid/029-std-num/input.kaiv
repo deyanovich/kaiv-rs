@@ -1,0 +1,8 @@
+.!kaiv
+.!types std/num
+&inf
+ceiling=inf
+&inf
+floor=-inf
+&nan
+blank=nan

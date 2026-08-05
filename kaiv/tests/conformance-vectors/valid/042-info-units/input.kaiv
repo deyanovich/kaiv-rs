@@ -1,0 +1,6 @@
+!int:GiB
+max_upload=10
+!int:Mbps
+link_rate=100
+!float:MiB/s
+throughput=93.7

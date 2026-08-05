@@ -1,0 +1,7 @@
+.!saiv acme/server-config
+!str
+host=
+!int[1,65535]
+port=
+!int
+timeout?=30

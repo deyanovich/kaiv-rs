@@ -1,0 +1,5 @@
+.!taiv acme/geo
+
+// Non-negative distance, kilometres at the definition site
+!float[0,]:km
+&distance=

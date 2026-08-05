@@ -1,0 +1,6 @@
+.!saiv acme/site
+
+!str re~^https://[a-z.]+(/.*)?$~
+url=
+!str re;^/[a-z/]+$;
+path=

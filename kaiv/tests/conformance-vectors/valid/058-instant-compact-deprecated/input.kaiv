@@ -1,0 +1,4 @@
+.!kaiv
+.?sensor1 https://sensors.example.com/1
+?sensor1@20250115T093000Z#req-42
+temp=100

@@ -1,0 +1,6 @@
+.!kaiv
+.!verbatim
+price=$5
+pattern=^abc$
+sep=$$
+note=see $@.other

@@ -1,0 +1,9 @@
+.!saiv acme/batch
+
+// Cardinality on a scalar array: the elements are indexed value
+// lines (`/@ids::N`), not field groups -- the Pass 1 counter must
+// see them (kaiv-rs regression: counted 0, refusing every batch).
+[/@ids min=1 max=3]
+[]
+!str
+/@ids;=

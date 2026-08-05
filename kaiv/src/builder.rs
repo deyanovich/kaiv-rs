@@ -419,19 +419,14 @@ fn check_ident(s: &str, what: &str) -> Result<(), PipelineError> {
     }
 }
 
-/// `YYYYMMDDTHHmmSSZ`, exactly 16 characters (SPEC.md §2.4.1).
+/// A provenance instant, in either accepted form (SPEC.md
+/// § Provenance).
 fn check_timestamp(ts: &str) -> Result<(), PipelineError> {
-    let b = ts.as_bytes();
-    let ok = b.len() == 16
-        && b[..8].iter().all(u8::is_ascii_digit)
-        && b[8] == b'T'
-        && b[9..15].iter().all(u8::is_ascii_digit)
-        && b[15] == b'Z';
-    if ok {
+    if crate::anno::valid_instant(ts) {
         Ok(())
     } else {
         Err(PipelineError::Other(format!(
-            "provenance timestamp '{ts}' is not YYYYMMDDTHHmmSSZ"
+            "provenance instant '{ts}' is not YYYY-MM-DDTHH:MM:SSZ"
         )))
     }
 }

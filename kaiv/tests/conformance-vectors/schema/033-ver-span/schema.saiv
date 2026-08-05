@@ -1,0 +1,10 @@
+.!saiv acme/releases
+
+// ..ver orders dotted components numerically: 1.10 > 1.9
+..ver [1.2,1.10]
+engine=
+
+// The \/ escape -- the sole escape in the family -- names a
+// literal slash inside a pattern body (SPEC.md section 10.4)
+/^[a-z]+\/[0-9]+$/
+branch=

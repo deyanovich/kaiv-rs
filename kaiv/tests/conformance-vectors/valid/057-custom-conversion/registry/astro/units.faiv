@@ -1,0 +1,10 @@
+.!faiv astro/units
+
+// Astronomical unit
+m 1.495978707e11
+&au=
+&AU=au
+
+// Custom currency with a rate source
+$ @https://rates.example.com/v1?code={code}&at={timestamp}
+&~XYZ=

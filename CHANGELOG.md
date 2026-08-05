@@ -8,6 +8,45 @@ but note that pre-1.0 releases may not adhere strictly to all
 guidelines. One entry covers the whole workspace; where the crates'
 versions differ, the entry names them.
 
+[0.13.0] - 2026-08-05
+---------------------
+
+Versions in this entry: `kaiv` 0.13.0, `kaiv-cli` 0.13.0,
+`kaiv-wasm` 0.13.0. `kaiv-lsp` is unchanged at 0.1.4.
+
+### Added
+
+- **`.!verbatim` — document-level opt-out of references and
+  `$$` escaping** (spec 1.0-draft.15, § Verbatim Documents). A
+  header declaration that makes values fully verbatim: every
+  `$` is literal, `$$` is two dollars, references and variables
+  do not exist. The Compiler carries the declaration into
+  `.raiv` (whose values likewise need no doubling) and the
+  Denormalizer discharges it — the `.daiv` output is
+  byte-identical to the escaped-authored equivalent's.
+  Reference machinery in a verbatim document (variable
+  definitions, splat lines, whole-value splices) raises the new
+  `VerbatimContextError`, as does misuse of the declaration
+  itself (arguments, a repeat, a position after content, or an
+  appearance in a kind other than `.kaiv`/`.raiv`).
+
+### Changed
+
+- **Provenance instants canonicalize to the dashed extended
+  ISO 8601 form** (spec 1.0-draft.14):
+  `?sensor1@2026-07-28T14:00:00Z`. The compact 16-character
+  form (`20260728T140000Z`) is accepted on input, canonicalized
+  away on emission (it never survives into `.raiv`/`.daiv`),
+  deprecated, and removed at 1.0.
+
+### Internal
+
+- **Conformance vectors are vendored** from the standalone
+  `kaiv-format/conformance` repository via
+  `scripts/refresh-vectors.sh`, with the source commit recorded
+  in `VECTORS` — `cargo test` no longer needs a sibling
+  checkout. This release ships vector set v3.
+
 [0.12.1] - 2026-08-02
 ---------------------
 

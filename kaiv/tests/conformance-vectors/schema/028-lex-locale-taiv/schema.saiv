@@ -1,0 +1,4 @@
+.!saiv acme/produits
+.!types acme/catalogue
+&nom_produit [Arbre,Mangue]
+nom=

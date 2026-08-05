@@ -1,0 +1,4 @@
+.!raiv
+!str'::host=example.com
+!int'::port=8080
+!str'::timeout=30

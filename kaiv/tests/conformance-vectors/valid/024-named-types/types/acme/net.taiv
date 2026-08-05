@@ -1,0 +1,9 @@
+.!taiv acme/net
+
+// TCP port number
+!int[1,65535]
+&port=
+
+// Hostname label - lowercase LDH
+/^[a-z0-9-]+$/ #[1,63]
+&label=

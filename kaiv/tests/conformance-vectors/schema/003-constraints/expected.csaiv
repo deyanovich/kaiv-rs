@@ -1,0 +1,4 @@
+.!csaiv acme/constraints strict
+!str'::host=
+!str {active,inactive}'::status=
+!int /^-?[0-9]+$/ ..num [1,100]'::score?=50

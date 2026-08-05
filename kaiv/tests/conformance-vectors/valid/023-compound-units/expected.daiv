@@ -1,0 +1,4 @@
+.!daiv
+!float:kg*m/s^2'/f::force=9.8
+!float:1'/r::ratio=1
+!float:~EUR'/o::total=99.50

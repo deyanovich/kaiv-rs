@@ -1,0 +1,7 @@
+.!saiv acme/badtag
+
+// 123 fails BCP 47 well-formedness (a language subtag is
+// alphabetic): rejected statically at schema-compile time,
+// backend-independent (the D-8 ruling).
+/^.{1,100}$/ ..lex[123]
+name=

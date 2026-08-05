@@ -41,8 +41,9 @@
 //! each sits behind the feature of its name.
 //!
 //! The executable definition of "correct" is the conformance tree in
-//! the spec repo (`spec/kaiv/conformance/`); `tests/conformance.rs`
-//! runs it. The Lexer implements the eager parsing model: the whole
+//! the conformance vectors, their own public repository
+//! (<https://gitlab.com/kaiv-format/conformance>), vendored here
+//! and run by `tests/conformance.rs`. The Lexer implements the eager parsing model: the whole
 //! text is validated before any token is emitted, and no tokens are
 //! emitted on error.
 //!

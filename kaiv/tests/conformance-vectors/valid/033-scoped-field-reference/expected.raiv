@@ -1,0 +1,3 @@
+.!raiv
+!str'/server::host=web1
+!str'/server::alias=$server::host

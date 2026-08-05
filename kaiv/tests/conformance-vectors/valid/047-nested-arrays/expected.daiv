@@ -1,0 +1,11 @@
+.!daiv
+!str'/@matrix/0/@values::0=a
+!str'/@matrix/0/@values::1=b
+!str'/@matrix/1/@values::0=c
+!str'/@servers/0::host=web-01
+!str'/@servers/0/@disks/0::dev=sda
+!str'/@servers/0/@disks/0::size=500
+!str'/@servers/0/@disks/1::dev=sdb
+!str'/@servers/0/@disks/1::size=250
+!str'/@cube/0/@planes/0/@points::0=1
+!str'/@cube/0/@planes/0/@points::1=2

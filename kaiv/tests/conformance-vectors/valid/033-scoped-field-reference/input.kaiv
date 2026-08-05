@@ -1,0 +1,5 @@
+.!kaiv
+(/server)
+host=web1
+alias=$host
+()

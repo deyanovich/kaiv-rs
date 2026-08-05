@@ -1,0 +1,4 @@
+.!csaiv hub/log-entry
+.!provenance:required
+!str'::level=
+/^/'::message=

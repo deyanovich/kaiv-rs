@@ -1,0 +1,6 @@
+.!saiv acme/cantine
+
+// -u-ks-level1 selects primary strength (SPEC.md section 5.3):
+// accents and case are ignored, so café is enum-equal to cafe.
+..lex[en-u-ks-level1] {cafe,the}
+drink=

@@ -1,0 +1,6 @@
+.!raiv
+.!verbatim
+!str'::price=$5
+!str'::pattern=^abc$
+!str'::sep=$$
+!str'::note=see $@.other

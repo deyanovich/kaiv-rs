@@ -1,0 +1,8 @@
+.!saiv acme/gateway strict
+.!schema hub/server-endpoint
+.!schema:/upstream hub/server-endpoint
+.!schema:/@mirrors hub/server-endpoint
+
+!int[1024,65535]
+port=
+name=

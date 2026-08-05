@@ -1,0 +1,10 @@
+.!saiv acme/orte
+
+// Under German collation, eszett is primary-equal to ss, so
+// strasse-with-eszett lands inside [strasse,strassf]; under byte
+// order its 0xC3 0x9F bytes sort past the whole range.
+..lex[de] [strasse,strassf]
+weg=
+
+..lex [strasse,strassf]
+bytes=

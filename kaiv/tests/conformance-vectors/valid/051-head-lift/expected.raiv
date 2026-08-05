@@ -1,0 +1,5 @@
+.!raiv
+.!schema:acme/lift
+!str'::host=web1
+!str'::port=8080
+!str'::dist=42.5

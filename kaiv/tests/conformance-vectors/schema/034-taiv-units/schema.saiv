@@ -1,0 +1,11 @@
+.!saiv acme/trip
+.!types acme/geo
+
+// The named type's unit is part of its identity ...
+&distance
+leg=
+
+// ... and may be narrowed to another unit of the same
+// dimension at the use site (SPEC.md section 2.7.9)
+!acme/geo/distance:m
+walked=

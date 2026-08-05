@@ -1,0 +1,7 @@
+.!saiv 1.0 acme/versioned strict
+
+// A versioned identity header: `1.0` names version 1 (omitted
+// components are zero), so the compiled header is the bare
+// canonical form -- with the strict modifier preserved.
+!str
+host=

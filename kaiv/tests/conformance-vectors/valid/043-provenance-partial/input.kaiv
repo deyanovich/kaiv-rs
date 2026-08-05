@@ -1,0 +1,13 @@
+.!kaiv
+.?probe https://sensors.example.com/probe
+.?backup https://sensors.example.com/backup
+?probe
+temp=21.5
+?probe@2026-07-14T08:15:00Z
+humidity=40
+?probe#row-17
+pressure=1013
+?probe@2026-07-14T08:15:00Z#row-18
+wind=3.2
+?probe,backup@2026-07-14T08:16:00Z
+gust=7.9

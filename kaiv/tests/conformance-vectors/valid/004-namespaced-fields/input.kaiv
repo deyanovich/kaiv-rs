@@ -1,0 +1,4 @@
+.!kaiv
+/server::host=localhost
+!int
+/book/intro::num_chars=1500

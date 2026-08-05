@@ -1,0 +1,3 @@
+.!daiv
+!str?api'::level=ERROR
+!str?api'::message=timeout

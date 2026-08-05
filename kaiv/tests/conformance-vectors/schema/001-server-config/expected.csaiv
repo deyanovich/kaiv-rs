@@ -1,0 +1,4 @@
+.!csaiv acme/server-config
+!str'::host=
+!int /^-?[0-9]+$/ ..num [1,65535]'::port=
+!int /^-?[0-9]+$/ ..num'::timeout?=30

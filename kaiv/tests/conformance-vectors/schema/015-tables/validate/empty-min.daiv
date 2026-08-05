@@ -1,0 +1,4 @@
+.!daiv
+!str'/@departments/0::name=eng
+!str'/@employees/0::name=ada
+!str'/@employees/0::department=eng

@@ -1,0 +1,4 @@
+.!daiv
+!str'::locked=ok
+!int'::loose=42
+!int'::free=7

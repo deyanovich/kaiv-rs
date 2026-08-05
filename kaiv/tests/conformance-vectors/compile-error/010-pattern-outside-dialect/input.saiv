@@ -1,0 +1,5 @@
+.!saiv acme/pat
+
+// \x80 is past ASCII — outside the pinned dialect.
+!str/^[\x80]+$/
+name=

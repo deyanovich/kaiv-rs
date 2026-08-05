@@ -1,0 +1,3 @@
+.!csaiv x509/algo
+{rsa,ecdsa}'::algorithm=
+/parameters [schema::crypto/rsa-params|crypto/ecdsa-params]

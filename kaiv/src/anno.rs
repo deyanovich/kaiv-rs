@@ -599,6 +599,57 @@ pub fn parse_constraint_items(s: &str) -> Option<Vec<Item>> {
     Some(items)
 }
 
+/// A provenance instant in either accepted form: the canonical
+/// dashed extended `YYYY-MM-DDTHH:MM:SSZ` (20 chars), or the
+/// deprecated compact basic `YYYYMMDDTHHmmSSZ` (16 chars).
+///
+/// The compact form is accepted through the `1.0-draft` series
+/// and removed at 1.0; producers never emit it (SPEC.md
+/// § Provenance). `:` inside a provenance run is unambiguous —
+/// the run opens with `?` and consumes to whitespace or `'`, so
+/// it never reaches the unit sigil's branch.
+pub(crate) fn valid_instant(t: &str) -> bool {
+    let b = t.as_bytes();
+    match b.len() {
+        20 => {
+            let digits = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+            digits.iter().all(|&i| b[i].is_ascii_digit())
+                && b[4] == b'-'
+                && b[7] == b'-'
+                && b[10] == b'T'
+                && b[13] == b':'
+                && b[16] == b':'
+                && b[19] == b'Z'
+        }
+        16 => {
+            b[..8].iter().all(u8::is_ascii_digit)
+                && b[8] == b'T'
+                && b[9..15].iter().all(u8::is_ascii_digit)
+                && b[15] == b'Z'
+        }
+        _ => false,
+    }
+}
+
+/// The canonical spelling of an accepted instant: the dashed form
+/// unchanged, the deprecated compact form expanded into it.
+/// Anything else is returned as-is — validity is the caller's
+/// check, not this function's.
+pub(crate) fn canonical_instant(t: &str) -> String {
+    if t.len() != 16 || !valid_instant(t) {
+        return t.to_string();
+    }
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &t[0..4],
+        &t[4..6],
+        &t[6..8],
+        &t[9..11],
+        &t[11..13],
+        &t[13..15]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

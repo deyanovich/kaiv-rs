@@ -1,0 +1,6 @@
+.!csaiv acme/orders
+/@customers [unique::id]
+!str'/@customers/::id=
+/@orders [unique::id]|[ref::customer=/@customers/*::id]
+!str'/@orders/::id=
+!str'/@orders/::customer=

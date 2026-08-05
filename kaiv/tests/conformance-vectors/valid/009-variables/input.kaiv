@@ -1,0 +1,6 @@
+.!kaiv
+/.base_endpoint:=host=localhost|ssl=true
+.default_timeout=30
+/server/api:=$/.base_endpoint
+/server/api::port=8080
+/server/api::timeout=$.default_timeout

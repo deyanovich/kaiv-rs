@@ -1,0 +1,5 @@
+.!daiv
+!acme/net/port'::listen=8080
+!str'::admin=9090
+!str'::motd=hello world
+!str'::name=eu1

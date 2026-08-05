@@ -1,0 +1,3 @@
+.!daiv
+.!schema:acme/blob
+!int:B'::size=4096

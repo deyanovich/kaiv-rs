@@ -1,0 +1,5 @@
+.!daiv
+.?sensor1 https://sensors.example.com/1
+.?lab urn:example:lab-7
+!str?sensor1@2026-07-14T09:00:00Z'::temp=22.1
+!str?lab'::calibrated=true

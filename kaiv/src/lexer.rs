@@ -84,6 +84,7 @@ const DECL_KEYWORDS: &[&str] = &[
     "schema",
     "types",
     "units",
+    "verbatim",
     "registry",
     "provenance",
     "ref",

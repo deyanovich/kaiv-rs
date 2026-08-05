@@ -1,0 +1,7 @@
+.!taiv acme/catalogue
+
+// Product name under French Canadian collation (SPEC.md
+// section 5.4's key principle: collation is a property of
+// named types, declared next to the pattern constraint)
+/^.{1,200}$/ ..lex[fr-CA]
+&nom_produit=

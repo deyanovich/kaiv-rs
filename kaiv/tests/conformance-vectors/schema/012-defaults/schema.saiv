@@ -1,0 +1,10 @@
+.!saiv acme/svc
+.!types acme/net
+
+&port
+listen?=
+&port
+admin?=9090
+&greeting
+motd?=
+name=

@@ -1,0 +1,4 @@
+.!csaiv acme/measures
+!float:km /^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/ ..num'::dist=
+!b64 /^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$/ #[22,22]'::key=
+!b64 /^([A-Za-z0-9_-]{4})*([A-Za-z0-9_-]{2,3})?$/ #{22,32,43}'::aes?=AAAAAAAAAAAAAAAAAAAAAA

@@ -1,0 +1,9 @@
+.!saiv acme/catalogue
+
+// French collation places E-acute with E (SPEC.md section 5.1);
+// the sibling field keeps bare ..lex (byte order) for contrast.
+..lex[fr] [Arbre,Mangue]
+titre=
+
+..lex [Arbre,Mangue]
+octets=

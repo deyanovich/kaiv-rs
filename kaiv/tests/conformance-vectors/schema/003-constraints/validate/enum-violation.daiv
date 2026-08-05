@@ -1,0 +1,3 @@
+.!daiv
+!str'::host=web01
+!str'::status=unknown

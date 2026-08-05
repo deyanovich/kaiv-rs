@@ -1,0 +1,7 @@
+.!saiv acme/constraints strict
+!str
+host=
+!str{active,inactive}
+status=
+!int[1,100]
+score?=50

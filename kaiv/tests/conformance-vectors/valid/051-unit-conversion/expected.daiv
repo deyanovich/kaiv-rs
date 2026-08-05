@@ -1,0 +1,4 @@
+.!daiv
+.!schema:acme/measure
+!float:m'::dist=42500
+!int:s'::timeout=300

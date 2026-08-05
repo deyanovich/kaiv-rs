@@ -1,0 +1,13 @@
+.!saiv acme/cluster strict
+!str
+name=
+!int[1,65535]
+/@ports;=
+[/@servers]
+!str
+host=
+!int
+port=
+!str
+role?=
+[]

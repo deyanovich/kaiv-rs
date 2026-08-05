@@ -1,0 +1,5 @@
+# service endpoints
+API_URL=https://api.example.com/v1
+PORT=8080
+DEBUG=false
+EMPTY=

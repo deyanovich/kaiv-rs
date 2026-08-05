@@ -1,0 +1,5 @@
+.!raiv
+!str'/server/api::host=localhost
+!str'/server/api::port=8080
+!str'/server/backup::host=$server/api::host
+!str'/server/backup::port=9090

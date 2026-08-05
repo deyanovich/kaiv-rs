@@ -1,15 +1,26 @@
-//! Runs the conformance tree from the spec repo. Location: the
-//! `KAIV_CONFORMANCE_DIR` env var, or `../../spec/kaiv/conformance`
-//! relative to this crate.
+//! Runs the conformance tree — the executable definition of
+//! correct. The tree is vendored into this repo under
+//! `tests/conformance-vectors/` so a fresh clone can run it with
+//! no sibling checkout, and so a run is pinned to an identifiable
+//! vector set (`VECTORS` names the spec commit it came from).
+//! Refresh it with `scripts/refresh-vectors.sh`; the spec repo
+//! stays authoritative.
+//!
+//! `KAIV_CONFORMANCE_DIR` still overrides, for testing against a
+//! working spec checkout without vendoring first.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn conformance_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("KAIV_CONFORMANCE_DIR") {
-        return PathBuf::from(d);
+    // An empty value counts as unset: `KAIV_CONFORMANCE_DIR=` in a
+    // CI env file would otherwise resolve to the empty path and
+    // fail every vector with a confusing "not found at ".
+    match std::env::var("KAIV_CONFORMANCE_DIR") {
+        Ok(d) if !d.is_empty() => return PathBuf::from(d),
+        _ => {}
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spec/kaiv/conformance")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/conformance-vectors")
 }
 
 /// The conformance tree lives in the spec repo, not this one, so a
@@ -23,11 +34,11 @@ fn require_conformance_dir() -> PathBuf {
     }
     panic!(
         "conformance vectors not found at {}\n\n\
-         The tree lives in the spec repo, which these tests expect as a\n\
-         sibling checkout:\n\n    \
-         <parent>/spec/kaiv/conformance\n    \
-         <parent>/kaiv-rs      (this repo)\n\n\
-         Point KAIV_CONFORMANCE_DIR at it if it lives elsewhere.",
+         The tree is vendored into this repo and should be present in\n\
+         any clone. If it is missing, restore it with:\n\n    \
+         scripts/refresh-vectors.sh [<spec-repo>]\n\n\
+         Or point KAIV_CONFORMANCE_DIR at a spec checkout's\n\
+         kaiv/conformance directory.",
         d.display()
     )
 }
@@ -102,6 +113,42 @@ fn gate(dir: &Path) -> Gate {
 
 /// Guard against a fifth or mis-named category directory silently going
 /// unexercised (e.g. `compile-errors`).
+/// The vendored tree must be able to name where it came from —
+/// that provenance is the whole difference between a pinned vector
+/// set and a directory someone copied once. A tree without it
+/// cannot be traced back to a spec commit, so refuse to run.
+#[test]
+fn the_vendored_tree_records_its_provenance() {
+    let dir = require_conformance_dir();
+    let marker = dir.join("VECTORS");
+    if !marker.is_file() {
+        // An explicit KAIV_CONFORMANCE_DIR points at a live spec
+        // checkout, which carries no marker; that is the
+        // documented override, not a vendored tree.
+        assert!(
+            std::env::var("KAIV_CONFORMANCE_DIR").is_ok_and(|v| !v.is_empty()),
+            "vendored tree at {} has no VECTORS marker — \
+             re-run scripts/refresh-vectors.sh",
+            dir.display()
+        );
+        return;
+    }
+    let text = fs::read_to_string(&marker).expect("VECTORS is readable");
+    let commit = text
+        .lines()
+        .find_map(|l| l.strip_prefix("commit: "))
+        .expect("VECTORS names a commit");
+    assert_eq!(commit.len(), 40, "commit is a full sha: {commit:?}");
+    assert!(
+        commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "commit is hex: {commit:?}"
+    );
+    assert!(
+        text.lines().any(|l| l.starts_with("describe: ")),
+        "VECTORS names a describe"
+    );
+}
+
 #[test]
 fn all_conformance_categories_are_known() {
     let known = ["valid", "invalid", "schema", "compile-error"];

@@ -1,0 +1,3 @@
+.!daiv
+!str'::host=localhost
+!str'::port=8080

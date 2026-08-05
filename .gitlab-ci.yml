@@ -4,10 +4,8 @@
 # variable on the authoritative project. Public mirrors are inert
 # publishing surfaces and must not run builds.
 #
-# The conformance tree lives in the sibling `spec` project, which the
-# test job clones with CI_JOB_TOKEN. Its path is derived from this
-# project's namespace rather than written out; set SPEC_REPO to a
-# full URL to override.
+# The conformance vectors are vendored into the repo, so no job
+# needs the spec project or a cross-project token.
 
 variables:
   CARGO_HOME: $CI_PROJECT_DIR/.cargo
@@ -55,19 +53,14 @@ clippy:
 
 # -------------------------------------------------------------- test
 
-# The conformance tree is the executable definition of correct, so
-# this job is the one that must never be allowed to silently skip:
-# the clone is a hard failure, and the harness itself refuses to run
-# without the vectors.
+# The conformance tree is vendored (tests/conformance-vectors,
+# refreshed by scripts/refresh-vectors.sh), so this job needs no
+# checkout of the spec repo and no cross-project token. The
+# harness refuses to run if the tree is missing, and a separate
+# test asserts it still names the spec commit it came from.
 test:
   stage: test
-  variables:
-    GIT_DEPTH: "1"
   script:
-    - SPEC_URL="${SPEC_REPO:-https://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_NAMESPACE}/spec.git}"
-    - git clone --depth 1 "$SPEC_URL" "$CI_PROJECT_DIR/../spec"
-    - export KAIV_CONFORMANCE_DIR="$CI_PROJECT_DIR/../spec/kaiv/conformance"
-    - test -d "$KAIV_CONFORMANCE_DIR"
     # Workspace first (binaries and the LSP), then the library with
     # every converter — that feature set is what arms the stress
     # suite, which compiles to nothing without it.

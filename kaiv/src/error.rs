@@ -122,6 +122,12 @@ pub enum AppError {
     /// or `$@.name` in a scalar position (SPEC.md
     /// § Namespace-Variable Splat).
     VariableContext,
+    /// A document declaring `.!verbatim` contains reference
+    /// machinery in a positional form — a variable-definition line,
+    /// a standalone splat line, or a whole-value splice — or the
+    /// declaration itself is misused: arguments, a repeat, or a
+    /// position after content (SPEC.md § Verbatim Documents).
+    VerbatimContext,
     /// A compound-form value collides with that form's delimiter:
     /// `|` in a `:=`/`+:=` pair value, `;` in `;=` data, `:` or `;`
     /// in an inline map entry (SPEC.md § Errors).
@@ -206,6 +212,7 @@ impl AppError {
             AppError::MetadataWithoutTarget => "MetadataWithoutTargetError",
             AppError::UndefinedReference => "UndefinedReferenceError",
             AppError::VariableContext => "VariableContextError",
+            AppError::VerbatimContext => "VerbatimContextError",
             AppError::DelimiterCollision => "DelimiterCollisionError",
             AppError::SchemaDuplicateKey => "SchemaDuplicateKeyError",
             AppError::SchemaInheritanceCycle => "SchemaInheritanceCycleError",
@@ -398,6 +405,7 @@ mod tests {
             ),
             (AppError::UndefinedReference, "UndefinedReferenceError"),
             (AppError::VariableContext, "VariableContextError"),
+            (AppError::VerbatimContext, "VerbatimContextError"),
             (AppError::DelimiterCollision, "DelimiterCollisionError"),
             (AppError::SchemaDuplicateKey, "SchemaDuplicateKeyError"),
             (

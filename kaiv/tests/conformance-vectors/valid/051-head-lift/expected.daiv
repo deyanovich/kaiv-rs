@@ -1,0 +1,5 @@
+.!daiv
+.!schema:acme/lift
+!str'::host=web1
+!int'::port=8080
+!float:km'::dist=42.5

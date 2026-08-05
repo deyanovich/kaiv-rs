@@ -1,0 +1,3 @@
+.!daiv
+!str?api@2026-07-03T21:00:00Z'::level=ERROR
+!str?api@2026-07-03T21:00:00Z#req-42'::message=timeout

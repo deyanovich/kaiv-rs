@@ -1,0 +1,2 @@
+.!csaiv acme/eq
+!str /^a=b$/'::pair=

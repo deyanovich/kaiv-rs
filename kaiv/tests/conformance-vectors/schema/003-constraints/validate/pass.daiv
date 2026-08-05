@@ -1,0 +1,4 @@
+.!daiv
+!str'::host=web01
+!str'::status=active
+!int'::score=42

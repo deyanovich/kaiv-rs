@@ -1,0 +1,6 @@
+.!saiv x509/bad
+
+(/parameters schema:crypto/rsa-params|crypto/ecdsa-params)
+!str
+modulus=
+()

@@ -1,0 +1,7 @@
+.!kaiv
+.ville=Zürich
+motto=é 日本 😀
+"café"=crème brûlée
+city=$.ville
+greeting=こんにちは $city
+sandwich=«$city»

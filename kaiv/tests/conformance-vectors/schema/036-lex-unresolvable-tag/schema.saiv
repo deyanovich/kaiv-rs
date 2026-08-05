@@ -1,0 +1,9 @@
+.!saiv acme/unresolvable
+
+// zz is a well-formed BCP 47 tag (2ALPHA language) that names no
+// language CLDR knows: the schema compiles, and every conforming
+// backend refuses the constraint at validation -- root fallback is
+// never silent (SPEC.md section 5.3; authors wanting root
+// collation say ..lex[und] explicitly).
+/^.{1,100}$/ ..lex[zz]
+name=

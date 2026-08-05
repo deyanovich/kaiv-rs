@@ -1,0 +1,5 @@
+.!daiv
+!str'::contact=o'brien@example.ie
+!str'::homepage=https://example.ie/~ob/
+!int'::port=8443
+!str'::impedance=50-0.3

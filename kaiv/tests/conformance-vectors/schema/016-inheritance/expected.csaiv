@@ -1,0 +1,11 @@
+.!csaiv acme/gateway strict
+!str'::host=
+!int /^-?[0-9]+$/ ..num [1024,65535]'::port=
+!int /^-?[0-9]+$/ ..num [1,3600]'::timeout_ms?=500
+!str'/upstream::host=
+!int /^-?[0-9]+$/ ..num [0,65535]'/upstream::port=
+!int /^-?[0-9]+$/ ..num [1,3600]'/upstream::timeout_ms?=500
+!str'/@mirrors/::host=
+!int /^-?[0-9]+$/ ..num [0,65535]'/@mirrors/::port=
+!int /^-?[0-9]+$/ ..num [1,3600]'/@mirrors/::timeout_ms?=500
+/^/'::name=

@@ -1,0 +1,2 @@
+.!csaiv acme/names
+/^[A-Za-z\x27-]+$/'::surname=

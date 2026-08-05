@@ -1,0 +1,7 @@
+.!saiv acme/root
+
+// ..lex[und] is the explicit, legal request for CLDR root
+// collation (SPEC.md section 5.3; the D-8 ruling) -- unlike an
+// unknown language, which must reject rather than fall back.
+/^.{1,100}$/ ..lex[und] [apple,cherry]
+fruit=

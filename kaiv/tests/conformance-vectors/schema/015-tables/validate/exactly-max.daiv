@@ -1,0 +1,10 @@
+.!daiv
+!str'/@servers/0::host=a
+!int'/@servers/0::port=80
+!str'/@servers/1::host=a
+!int'/@servers/1::port=443
+!str'/@servers/2::host=b
+!int'/@servers/2::port=80
+!str'/@departments/0::name=eng
+!str'/@employees/0::name=ada
+!str'/@employees/0::department=eng

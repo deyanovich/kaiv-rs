@@ -1,0 +1,7 @@
+.!kaiv
+!float:m*kg/s^2
+/f::force=9.8
+!float:m/m
+/r::ratio=1
+!float:~EUR
+/o::total=99.50

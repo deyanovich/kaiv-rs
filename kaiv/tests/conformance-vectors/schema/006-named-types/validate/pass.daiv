@@ -1,0 +1,3 @@
+.!daiv
+!acme/net/port'::listen=8080
+!acme/net/label'::name=web-01

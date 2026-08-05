@@ -1,0 +1,5 @@
+.!kaiv
+.!registry acme=./local
+.!types acme/net
+&port
+listen=8080

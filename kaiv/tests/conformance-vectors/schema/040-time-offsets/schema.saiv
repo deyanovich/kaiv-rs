@@ -1,0 +1,6 @@
+.!saiv acme/window
+.!types std/time
+
+# Maintenance window: instants inside 22:00Z-23:00Z on 2025-12-31.
+&datetime [2025-12-31T22:00:00Z,2025-12-31T23:00:00Z]
+start=

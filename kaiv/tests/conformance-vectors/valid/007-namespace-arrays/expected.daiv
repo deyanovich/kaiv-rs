@@ -1,0 +1,5 @@
+.!daiv
+!str'/@servers/0::host=a
+!str'/@servers/0::port=1
+!str'/@servers/1::host=b
+!str'/@servers/1::port=2

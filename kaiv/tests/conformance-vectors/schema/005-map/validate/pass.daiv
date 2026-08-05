@@ -1,0 +1,3 @@
+.!daiv
+!str'/settings::retries=3
+!str'/settings::timeout=30

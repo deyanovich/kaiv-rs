@@ -1,0 +1,6 @@
+.!kaiv
+.!types std/time
+&datetime
+when=2026-07-03T21:00:00Z
+&date
+day=2026-07-03

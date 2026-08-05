@@ -1,0 +1,5 @@
+.!kaiv
+!float:km
+/trip::length=42
+!float:m*s^-1
+/vehicle::speed=3

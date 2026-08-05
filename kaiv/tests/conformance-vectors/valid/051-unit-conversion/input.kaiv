@@ -1,0 +1,8 @@
+.!kaiv
+.!schema:acme/measure
+
+!float:km
+dist=42.5
+
+!int:min
+timeout=5

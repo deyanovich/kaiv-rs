@@ -1,0 +1,11 @@
+.!saiv acme/defaults
+
+// The pinned CLDR root defaults (SPEC.md section 5.3): no
+// numeric reordering -- "10" stays lexically before "5" while
+// "9" sorts past it -- and tertiary strength keeps case
+// distinctions significant.
+..lex[en] [1,5]
+rank=
+
+..lex[en] {apple,pear}
+fruit=

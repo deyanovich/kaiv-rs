@@ -1,0 +1,4 @@
+.!daiv
+!str'::host=example.com
+!str'::host=other.com
+!int'::port=8080

@@ -1,0 +1,6 @@
+.!daiv
+.!schema:x509/algo
+.!schema:/parameters crypto/rsa-params
+!str'::algorithm=rsa
+!str'/parameters::modulus=00ab
+!str'/parameters::exponent=65537

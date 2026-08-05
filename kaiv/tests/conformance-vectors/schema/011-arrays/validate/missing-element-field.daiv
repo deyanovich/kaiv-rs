@@ -1,0 +1,3 @@
+.!daiv
+!str'::name=eu1
+!str'/@servers/0::host=a

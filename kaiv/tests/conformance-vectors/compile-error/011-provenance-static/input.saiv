@@ -1,0 +1,10 @@
+.!saiv acme/audit
+.!provenance:required
+
+!str
+actor=
+
+# Statically unsatisfiable: a materialized line for an absent
+# optional field carries no provenance (SPEC.md section 2.4.3)
+!str
+note?=none

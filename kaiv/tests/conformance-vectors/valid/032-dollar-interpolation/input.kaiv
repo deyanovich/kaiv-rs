@@ -1,0 +1,4 @@
+.!kaiv
+.host=example.com
+url=http://$.host/api
+price=$$5

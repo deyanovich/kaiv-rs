@@ -1,0 +1,8 @@
+.!daiv
+.?probe https://sensors.example.com/probe
+.?backup https://sensors.example.com/backup
+!str?probe'::temp=21.5
+!str?probe@2026-07-14T08:15:00Z'::humidity=40
+!str?probe#row-17'::pressure=1013
+!str?probe@2026-07-14T08:15:00Z#row-18'::wind=3.2
+!str?probe,backup@2026-07-14T08:16:00Z'::gust=7.9

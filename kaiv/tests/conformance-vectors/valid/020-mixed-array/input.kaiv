@@ -1,0 +1,4 @@
+.!kaiv
+/@items+=hello
+/@items+:=name=Alice
+/@items+=42

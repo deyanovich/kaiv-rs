@@ -1,0 +1,14 @@
+.!saiv acme/intent
+
+# Authored !str — the identity declaration: retained as a nominal
+# head, rejects asserted types (D-12).
+!str
+locked=
+
+# Anonymous refinement — headless: structural, tolerates
+# assertions; the pattern governs the value.
+/^[a-z0-9]+$/
+loose=
+
+# Unannotated — headless, with the vacuous-pattern lex-saver.
+free=

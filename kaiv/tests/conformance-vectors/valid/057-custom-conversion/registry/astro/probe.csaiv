@@ -1,0 +1,3 @@
+.!csaiv astro/probe
+!float:m /^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/ ..num'/probe::dist=
+!float:m/s /^-?[0-9]*\.?[0-9]+([eE][+-]?[0-9]+)?$/ ..num'/probe::speed=

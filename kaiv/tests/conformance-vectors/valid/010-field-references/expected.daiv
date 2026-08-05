@@ -1,0 +1,5 @@
+.!daiv
+!str'/server/api::host=localhost
+!str'/server/api::port=8080
+!str'/server/backup::host=localhost
+!str'/server/backup::port=9090

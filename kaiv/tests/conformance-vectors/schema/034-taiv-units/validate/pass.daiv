@@ -1,0 +1,3 @@
+.!daiv
+!acme/geo/distance:km'::leg=12.5
+!acme/geo/distance:m'::walked=800
