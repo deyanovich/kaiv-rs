@@ -1581,10 +1581,9 @@ mod tests {
     fn verbatim_raiv_is_consumed_without_collapse() {
         // Hand-crafted `.raiv` carrying the declaration: values pass
         // through with no `$$` collapse and no reference lookup.
-        let daiv = crate::denorm::denormalize(
-            ".!raiv\n.!verbatim\n!str'::a=$$x\n!str'::b=$undefined\n",
-        )
-        .unwrap();
+        let daiv =
+            crate::denorm::denormalize(".!raiv\n.!verbatim\n!str'::a=$$x\n!str'::b=$undefined\n")
+                .unwrap();
         assert_eq!(daiv, ".!daiv\n!str'::a=$$x\n!str'::b=$undefined\n");
         // Misuse in canonical input errors like the Compiler's.
         for bad in [

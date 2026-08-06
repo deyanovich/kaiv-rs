@@ -95,6 +95,7 @@ features:
           - "--features serde"
           - "--features net"
   script:
+    - rustup component add clippy
     - cargo build -p kaiv $FEATURE_SET
     - cargo clippy -p kaiv $FEATURE_SET -- -D warnings
 
@@ -139,9 +140,10 @@ package:
     # for the things that are silently missing until someone
     # downloads the tarball: the licence texts a crate promises in
     # its metadata, and the readme crates.io renders.
-    - for c in kaiv kaiv-cli kaiv-lsp; do
-        cargo package --list -p $c --allow-dirty > "/tmp/$c.files";
+    - |
+      for c in kaiv kaiv-cli kaiv-lsp; do
+        cargo package --list -p $c --allow-dirty > "/tmp/$c.files"
         for f in LICENSE-MIT LICENSE-APACHE README.md; do
-          grep -qx "$f" "/tmp/$c.files" || { echo "$c: $f missing from the package"; exit 1; };
-        done;
+          grep -qx "$f" "/tmp/$c.files" || { echo "$c: $f missing from the package"; exit 1; }
+        done
       done
